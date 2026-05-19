@@ -294,6 +294,15 @@ export function registerSpaceHandlers(): void {
     }
   });
 
+  wrapIpcHandle(
+    'dialog:open',
+    async (_event, options: Electron.OpenDialogOptions) => {
+      const { dialog } = await import('electron');
+      const result = await dialog.showOpenDialog(options);
+      return result.filePaths;
+    },
+  );
+
   // Update space preferences (layout settings)
   wrapIpcHandle(
     'space:update-preferences',
