@@ -10,6 +10,9 @@
 import * as path from 'path';
 import * as fs from 'fs/promises';
 import { existsSync } from 'fs';
+import * as os from 'os';
+import * as crypto from 'crypto';
+import extractZip from 'extract-zip';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type {
   SkillSpec,
@@ -18,6 +21,12 @@ import type {
   SkillFileNode,
 } from '../../shared/skill/skill-types';
 import { getAgentsSkillsDir, getClaudeSkillsDir, getAllSkillsDirs } from '../config.service';
+
+export interface ImportSkillsResult {
+  installed: string[];
+  skipped: string[];
+  errors: string[];
+}
 
 export class SkillManager {
   private static instance: SkillManager;
@@ -602,5 +611,106 @@ export class SkillManager {
   async refresh(): Promise<void> {
     await this.loadSkills();
     console.log('[SkillManager] Refreshed skills');
+  }
+
+  /**
+   * 从目录批量导入技能（核心方法）
+   * 扫描一级子目录，每个含 SKILL.md 或 SKILL.yaml 的子目录视为一个技能
+   */
+  async installFromDirectory(
+    dirPath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<ImportSkillsResult> {
+    const result: ImportSkillsResult = { installed: [], skipped: [], errors: [] };
+
+    const entries = await fs.readdir(dirPath, { withFileTypes: true });
+    const subDirs = entries.filter((e) => e.isDirectory());
+
+    if (subDirs.length === 0) {
+      result.errors.push('Directory contains no subdirectories');
+      return result;
+    }
+
+    const targetDir = this.skillsDirs[0];
+
+    for (const subDir of subDirs) {
+      const skillName = subDir.name;
+      const srcPath = path.join(dirPath, skillName);
+      const hasSkillMd = existsSync(path.join(srcPath, 'SKILL.md'));
+      const hasSkillYaml = existsSync(path.join(srcPath, 'SKILL.yaml'));
+
+      if (!hasSkillMd && !hasSkillYaml) {
+        result.skipped.push(skillName);
+        onProgress?.(`Skipped (no SKILL.md/SKILL.yaml): ${skillName}`);
+        continue;
+      }
+
+      const destPath = path.join(targetDir, skillName);
+
+      try {
+        if (existsSync(destPath)) {
+          await fs.rm(destPath, { recursive: true, force: true });
+        }
+
+        await this.copyDirRecursive(srcPath, destPath);
+
+        result.installed.push(skillName);
+        onProgress?.(`Installed: ${skillName}`);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        result.errors.push(`${skillName}: ${msg}`);
+        onProgress?.(`Failed: ${skillName} - ${msg}`);
+      }
+    }
+
+    await this.refresh();
+
+    onProgress?.(
+      `Done. Installed: ${result.installed.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`,
+    );
+
+    return result;
+  }
+
+  /**
+   * 从 ZIP 文件导入技能（壳方法）
+   * 解压到临时目录后调用 installFromDirectory
+   */
+  async installFromZip(
+    filePath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<ImportSkillsResult> {
+    const tmpDir = path.join(os.tmpdir(), `aico-skill-zip-${crypto.randomUUID()}`);
+    await fs.mkdir(tmpDir, { recursive: true });
+
+    try {
+      onProgress?.(`Extracting ZIP: ${path.basename(filePath)}...`);
+      await extractZip(filePath, { dir: tmpDir });
+      return this.installFromDirectory(tmpDir, onProgress);
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      return { installed: [], skipped: [], errors: [`ZIP extraction failed: ${msg}`] };
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
+    }
+  }
+
+  /**
+   * 递归复制目录
+   */
+  private async copyDirRecursive(src: string, dest: string): Promise<void> {
+    await fs.mkdir(dest, { recursive: true });
+    const entries = await fs.readdir(src, { withFileTypes: true });
+
+    for (const entry of entries) {
+      const srcEntry = path.join(src, entry.name);
+      const destEntry = path.join(dest, entry.name);
+
+      if (entry.isDirectory()) {
+        await this.copyDirRecursive(srcEntry, destEntry);
+      } else {
+        await fs.copyFile(srcEntry, destEntry);
+      }
+    }
   }
 }
