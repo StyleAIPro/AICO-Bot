@@ -391,7 +391,7 @@ export function SkillLibrary() {
     if (isElectron()) {
       try {
         const filePaths = await window.aicoBot.showOpenDialog({
-          title: 'Select ZIP file',
+          title: t('Select ZIP file'),
           filters: [{ name: 'ZIP', extensions: ['zip'] }],
           properties: ['openFile'],
         });
@@ -433,7 +433,7 @@ export function SkillLibrary() {
 
     try {
       const dirPaths = await window.aicoBot.showOpenDialog({
-        title: 'Select folder containing skills',
+        title: t('Select folder containing skills'),
         properties: ['openDirectory'],
       });
 
