@@ -17,7 +17,7 @@ import {
 } from './transport';
 
 // Re-export onEvent for components that need to listen to IPC events
-export { onEvent } from './transport';
+export { onEvent, isElectron } from './transport';
 import type {
   HealthStatusResponse,
   HealthStateResponse,
