@@ -70,6 +70,17 @@ export function registerSkillHandlers(conversationService: ConversationService):
     },
   );
 
+  // ── skill:import-skills ────────────────────────────────────────────────
+  wrapIpcHandle(
+    'skill:import-skills',
+    async (event, input: { sourceType: 'zip' | 'folder'; filePath: string }) => {
+      const onOutput = (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => {
+        event.sender.send('skill:install-output', 'import-skills', data);
+      };
+      return skillController.importSkills(input.sourceType, input.filePath, onOutput);
+    },
+  );
+
   // ── skill:uninstall ────────────────────────────────────────────────────
   wrapIpcHandle('skill:uninstall', async (_event, skillId: string) => {
     console.info(`[event] uninstallSkill: skillId=${skillId}`);
