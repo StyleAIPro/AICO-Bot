@@ -3,7 +3,12 @@
  * 处理 Skill 相关的业务逻辑
  */
 
+import * as os from 'os';
+import * as path from 'path';
+import * as fs from 'fs/promises';
+import * as crypto from 'crypto';
 import { SkillManager } from '../services/skill/skill-manager';
+import type { ImportSkillsResult } from '../services/skill/skill-manager';
 import { SkillMarketService } from '../services/skill/skill-market-service';
 import { SkillGeneratorService } from '../services/skill/skill-generator';
 import type { ConversationService } from '../services/conversation.service';
@@ -597,6 +602,73 @@ export async function installSkillFromYaml(
     return {
       success: false,
       error: error instanceof Error ? error.message : 'Failed to install skill',
+    };
+  }
+}
+
+/**
+ * 从文件路径导入技能（支持 ZIP 和文件夹）
+ */
+export async function importSkills(
+  sourceType: 'zip' | 'folder',
+  filePath: string,
+  onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
+): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
+  try {
+    await ensureInitialized();
+    const skillManager = SkillManager.getInstance();
+
+    const onProgress = (message: string) => {
+      onOutput?.({ type: 'stdout', content: message });
+    };
+
+    let result: ImportSkillsResult;
+    if (sourceType === 'zip') {
+      result = await skillManager.installFromZip(filePath, onProgress);
+    } else {
+      result = await skillManager.installFromDirectory(filePath, onProgress);
+    }
+
+    await syncSkillStateToSdk();
+
+    return { success: true, data: result };
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Unknown error',
+    };
+  }
+}
+
+/**
+ * 从 ZIP Buffer 导入技能（用于 HTTP 上传）
+ */
+export async function importFromZipBuffer(
+  zipBuffer: Buffer,
+  onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
+): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
+  try {
+    await ensureInitialized();
+    const skillManager = SkillManager.getInstance();
+
+    const tmpFile = path.join(os.tmpdir(), `aico-skill-upload-${crypto.randomUUID()}.zip`);
+    await fs.writeFile(tmpFile, zipBuffer);
+
+    try {
+      const result = await skillManager.installFromZip(tmpFile, (message) => {
+        onOutput?.({ type: 'stdout', content: message });
+      });
+
+      await syncSkillStateToSdk();
+
+      return { success: true, data: result };
+    } finally {
+      await fs.rm(tmpFile, { force: true }).catch(() => {});
+    }
+  } catch (err) {
+    return {
+      success: false,
+      error: err instanceof Error ? err.message : 'Unknown error',
     };
   }
 }
