@@ -89,6 +89,7 @@ export async function sendMessage(
     aiBrowserEnabled,
     thinkingEnabled,
     canvasContext,
+    activeKnowledgeBases,
   } = request;
 
   // === Remote execution routing ===
@@ -373,10 +374,17 @@ export async function sendMessage(
       }
     }
 
-    let systemPromptAppend = '';
+    // KB context is injected as a user-message prefix, NOT appended to the system prompt.
+    // System prompt is set once at session creation and cannot be reliably updated after
+    // session resume (the SDK restores the old system prompt from disk). By injecting KB
+    // context into the user message itself, each message independently controls whether
+    // KB context is present, regardless of session reuse or resume.
+    let kbMessagePrefix = '';
     if (kbContextParts.length > 0) {
-      systemPromptAppend += `[Knowledge Base Context]\nThe following is retrieved from the user's local knowledge base. Use it as the PRIMARY reference for relevant topics. You MUST supplement with your own knowledge ONLY where the knowledge base lacks coverage. Do NOT contradict specific facts stated in the knowledge base.\n\nCITATION RULES (MUST follow exactly):\n1. In paragraphs where you use knowledge base information, insert numbered markers like [1], [2] at the relevant point.\n2. At the VERY END of your response, place ALL references under "参考知识库文档：" header. Each reference on its OWN LINE with a blank line between each item (double newline).\n3. Each reference format: [编号]知识库{知识库名称}-wiki页面标题\n   - "知识库名称": copy EXACTLY from the "知识库名称: xxx" line in the context below. Do NOT make up or change the name.\n   - "wiki页面标题": copy from the "## xxx" header of the referenced page.\n4. Do NOT use any other citation format. Do NOT fabricate knowledge base names.\n\nEXAMPLE (note the blank lines between references):\n波束赋形可在干扰源方向形成零陷[1]，将干扰抑制20-40dB。\n\n参考知识库文档：\n\n[1]知识库{1}-波束赋形基础\n\n[2]知识库{9}-GPS抗干扰技术\n\n${kbContextParts.join('\n\n')}\n\n[End Knowledge Base Context]\n\n`;
+      kbMessagePrefix = `[Knowledge Base Context]\nThe following is retrieved from the user's local knowledge base. Use it as the PRIMARY reference for relevant topics. You MUST supplement with your own knowledge ONLY where the knowledge base lacks coverage. Do NOT contradict specific facts stated in the knowledge base.\n\nCITATION RULES (MUST follow exactly):\n1. In paragraphs where you use knowledge base information, insert numbered markers like [1], [2] at the relevant point.\n2. At the VERY END of your response, place ALL references under "参考知识库文档：" header. Each reference on its OWN LINE with a blank line between each item (double newline).\n3. Each reference format: [编号]知识库{知识库名称}-wiki页面标题\n   - "知识库名称": copy EXACTLY from the "知识库名称: xxx" line in the context below. Do NOT make up or change the name.\n   - "wiki页面标题": copy from the "## xxx" header of the referenced page.\n4. Do NOT use any other citation format. Do NOT fabricate knowledge base names.\n\nEXAMPLE (note the blank lines between references):\n波束赋形可在干扰源方向形成零陷[1]，将干扰抑制20-40dB。\n\n参考知识库文档：\n\n[1]知识库{1}-波束赋形基础\n\n[2]知识库{9}-GPS抗干扰技术\n\n${kbContextParts.join('\n\n')}\n\n[End Knowledge Base Context]\n\n`;
     }
+
+    let systemPromptAppend = '';
 
     if (aiBrowserEnabled) {
       systemPromptAppend += buildSystemPromptWithAIBrowser(
@@ -473,7 +481,12 @@ export async function sendMessage(
       console.log(`[Agent][${conversationId}] Message includes ${images.length} image(s) (base64)`);
     }
     const canvasPrefix = formatCanvasContext(canvasContext);
-    const messageWithContext = canvasPrefix + message;
+    // When KB is disabled, inject a negative instruction to prevent the AI from
+    // referencing KB content that was injected in earlier messages of this conversation.
+    const kbNegativePrefix = kbContextParts.length === 0
+      ? '[Instruction: The knowledge base is currently DISABLED. Do NOT reference any knowledge base content or use knowledge base citation format (like 知识库{名称}-标题) in your response. Answer based on your own knowledge only.]\n\n'
+      : '';
+    const messageWithContext = kbMessagePrefix + kbNegativePrefix + canvasPrefix + message;
     let messageContent = buildMessageContent(messageWithContext, images);
 
     // Add continuation prefix to prevent off-by-one in two scenarios:

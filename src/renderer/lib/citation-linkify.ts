@@ -57,10 +57,30 @@ export function processCitationLinks(content: string): string {
 
   if (citationMap.size === 0) return content;
 
-  // 2. Replace reference lines FIRST (index-based, from end to start)
-  let result = content;
+  // Sort refs by index (descending) to find reference section start position
   const sortedRefs = [...refLines].sort((a, b) => b.index - a.index);
+
+  // 2. Filter: only keep references actually used in the body (before reference section)
+  const refStartIndex = sortedRefs.length > 0 ? sortedRefs[sortedRefs.length - 1].index : content.length;
+  const bodyText = content.slice(0, refStartIndex);
+  const usedNums = new Set<number>();
+  const bodyNumRe = /(?<!\[)\[(\d+)\](?!\()/g;
+  let bodyMatch: RegExpExecArray | null;
+  while ((bodyMatch = bodyNumRe.exec(bodyText)) !== null) {
+    usedNums.add(parseInt(bodyMatch[1], 10));
+  }
+  for (const num of Array.from(citationMap.keys())) {
+    if (!usedNums.has(num)) citationMap.delete(num);
+  }
+  if (citationMap.size === 0) return content;
+
+  // 3. Replace reference lines FIRST (index-based, from end to start)
+  let result = content;
   for (const ref of sortedRefs) {
+    if (!citationMap.has(ref.num)) {
+      result = result.slice(0, ref.index) + result.slice(ref.index + ref.length);
+      continue;
+    }
     const href = `${WIKI_HREF_PREFIX}${encodeURIComponent(ref.kbName)}/${encodeURIComponent(ref.pageTitle)}`;
     const linkText = `知识库{${ref.kbName}}-${ref.pageTitle}`;
     const replacement = `[[${ref.num}] ${linkText}](${href})`;
