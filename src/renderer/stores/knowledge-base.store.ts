@@ -45,6 +45,7 @@ interface KnowledgeBaseState {
   error: string | null;
   activeKnowledgeBaseIds: string[];
   ingestProgress: { current: number; total: number; fileName: string } | null;
+  ingestingKbId: string | null;
   wikiUpdatedCounter: number;
   pendingPageExpand: PendingPageExpand | null;
   toggleActiveKb: (kbId: string) => void;
@@ -64,7 +65,7 @@ interface KnowledgeBaseState {
   loadWikiPages: (kbId: string) => Promise<void>;
   ingestAll: (kbId: string) => Promise<void>;
   ingestIncremental: (kbId: string) => Promise<void>;
-  cancelIngest: (kbId: string) => Promise<void>;
+  cancelIngest: () => Promise<void>;
   recompile: (kbId: string) => Promise<void>;
   compile: (kbId: string) => Promise<void>;
   query: (kbId: string, question: string) => Promise<{ answer: string; citedPages: string[] }>;
@@ -86,6 +87,7 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   error: null,
   activeKnowledgeBaseIds: [],
   ingestProgress: null,
+  ingestingKbId: null,
   wikiUpdatedCounter: 0,
   pendingPageExpand: null,
 
@@ -251,7 +253,7 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   },
 
   ingestAll: async (kbId: string) => {
-    set({ loadingAction: 'fullIngest', loading: true, error: null, ingestProgress: null });
+    set({ loadingAction: 'fullIngest', loading: true, error: null, ingestProgress: null, ingestingKbId: kbId });
     try {
       const res = await kbApi.kbIngestAll(kbId);
       if (res.success) {
@@ -260,26 +262,26 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
         const pagesCreated = (data.pagesCreated as number) ?? 0;
         await Promise.all([get().loadWikiPages(kbId), get().loadSources(kbId)]);
         if (errors.length > 0 && pagesCreated === 0) {
-          set({ error: errors.join('\n'), loadingAction: null, loading: false });
+          set({ error: errors.join('\n'), loadingAction: null, loading: false, ingestingKbId: null });
         } else if (errors.length > 0) {
-          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false });
+          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false, ingestingKbId: null });
         } else {
-          set({ loadingAction: null, loading: false });
+          set({ loadingAction: null, loading: false, ingestingKbId: null });
         }
       } else {
         if (res.error === 'NO_NEW_FILES') {
-          set({ error: 'NO_NEW_FILES', loadingAction: null, loading: false });
+          set({ error: 'NO_NEW_FILES', loadingAction: null, loading: false, ingestingKbId: null });
         } else {
-          set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false });
+          set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false, ingestingKbId: null });
         }
       }
     } catch (err: unknown) {
-      set({ error: (err as Error).message, loadingAction: null, loading: false });
+      set({ error: (err as Error).message, loadingAction: null, loading: false, ingestingKbId: null });
     }
   },
 
   ingestIncremental: async (kbId: string) => {
-    set({ loadingAction: 'ingest', loading: true, error: null, ingestProgress: null });
+    set({ loadingAction: 'ingest', loading: true, error: null, ingestProgress: null, ingestingKbId: kbId });
     try {
       const res = await kbApi.kbIngestIncremental(kbId);
       if (res.success) {
@@ -288,32 +290,41 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
         const pagesCreated = (data.pagesCreated as number) ?? 0;
         await Promise.all([get().loadWikiPages(kbId), get().loadSources(kbId)]);
         if (errors.length > 0 && pagesCreated === 0) {
-          set({ error: errors.join('\n'), loadingAction: null, loading: false });
+          set({ error: errors.join('\n'), loadingAction: null, loading: false, ingestingKbId: null });
         } else if (errors.length > 0) {
-          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false });
+          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false, ingestingKbId: null });
         } else {
-          set({ loadingAction: null, loading: false });
+          set({ loadingAction: null, loading: false, ingestingKbId: null });
         }
       } else {
         if (res.error === 'NO_NEW_FILES') {
-          set({ error: 'NO_NEW_FILES', loadingAction: null, loading: false });
+          set({ error: 'NO_NEW_FILES', loadingAction: null, loading: false, ingestingKbId: null });
         } else {
-          set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false });
+          set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false, ingestingKbId: null });
         }
       }
     } catch (err: unknown) {
-      set({ error: (err as Error).message, loadingAction: null, loading: false });
+      set({ error: (err as Error).message, loadingAction: null, loading: false, ingestingKbId: null });
     }
   },
 
-  cancelIngest: async (kbId: string) => {
-    await kbApi.kbCancelIngest(kbId);
-    set({ loadingAction: null, loading: false, ingestProgress: null });
-    await get().loadSources(kbId);
+  cancelIngest: async () => {
+    const kbId = get().ingestingKbId;
+    if (kbId) await kbApi.kbCancelIngest(kbId);
+    set({ loadingAction: null, loading: false, ingestProgress: null, ingestingKbId: null });
+    if (kbId) await get().loadSources(kbId);
   },
 
   recompile: async (kbId: string) => {
-    set({ loadingAction: 'recompile', loading: true, error: null, ingestProgress: null });
+    set((state) => ({
+      loadingAction: 'recompile' as const,
+      loading: true,
+      error: null,
+      ingestProgress: null,
+      ingestingKbId: kbId,
+      wikiPages: [],
+      sources: state.sources.map((s) => ({ ...s, status: 'pending' as const })),
+    }));
     try {
       const res = await kbApi.kbRecompile(kbId);
       if (res.success) {
@@ -321,15 +332,15 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
         const errors = (data.errors as string[] | undefined) ?? [];
         await Promise.all([get().loadWikiPages(kbId), get().loadSources(kbId)]);
         if (errors.length > 0) {
-          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false });
+          set({ error: `部分文件摄取失败: ${errors.join('\n')}`, loadingAction: null, loading: false, ingestingKbId: null });
         } else {
-          set({ loadingAction: null, loading: false });
+          set({ loadingAction: null, loading: false, ingestingKbId: null });
         }
       } else {
-        set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false });
+        set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false, ingestingKbId: null });
       }
     } catch (err: unknown) {
-      set({ error: (err as Error).message, loadingAction: null, loading: false });
+      set({ error: (err as Error).message, loadingAction: null, loading: false, ingestingKbId: null });
     }
   },
 

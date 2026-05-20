@@ -1,4 +1,5 @@
 import { useEffect, useRef, useCallback, useMemo } from 'react';
+import { useTranslation } from 'react-i18next';
 import { forceSimulation, forceLink, forceManyBody, forceX, forceY, forceCollide } from 'd3-force';
 
 interface GraphNode {
@@ -87,6 +88,7 @@ interface Props {
 }
 
 export function KnowledgeGraph({ data, onNodeClick }: Props) {
+  const { t } = useTranslation();
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const nodesRef = useRef<GraphNode[]>([]);
   const linksRef = useRef<GraphLink[]>([]);
@@ -413,7 +415,7 @@ export function KnowledgeGraph({ data, onNodeClick }: Props) {
   if (data.nodes.length === 0) {
     return (
       <div className="text-sm text-muted-foreground text-center py-12">
-        No wiki pages to display
+        {t('kb.noWikiPages')}
       </div>
     );
   }

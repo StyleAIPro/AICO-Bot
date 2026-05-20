@@ -117,6 +117,25 @@ export class WikiEngine {
     this.titleCache = null;
   }
 
+  clearGeneratedContent(): void {
+    const wikiDir = path.join(this.kbPath, 'wiki');
+    if (!fs.existsSync(wikiDir)) return;
+    for (const subdir of ['summaries', 'concepts', 'entities']) {
+      const dirPath = path.join(wikiDir, subdir);
+      if (fs.existsSync(dirPath)) {
+        fs.rmSync(dirPath, { recursive: true, force: true });
+      }
+    }
+    for (const file of ['index.md', 'log.md', '_report.md']) {
+      const filePath = path.join(wikiDir, file);
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    }
+    this.titleCache = null;
+    this.indexCache = null;
+    this.pageMetaCache = null;
+    this.synonymCache = null;
+  }
+
   // ---------------------------------------------------------------------------
   // Ingest
   // ---------------------------------------------------------------------------
@@ -224,6 +243,33 @@ export class WikiEngine {
   // Phase 2: Generation — based on analysis report
   // ===========================================================================
 
+  /**
+   * Run tasks with a concurrency limit. Uses a sliding window pattern.
+   * If signal is aborted, remaining tasks are rejected immediately.
+   */
+  private async runWithConcurrency<T>(
+    tasks: Array<() => Promise<T>>,
+    concurrency: number,
+    signal?: AbortSignal,
+  ): Promise<T[]> {
+    const results: T[] = new Array(tasks.length);
+    let nextIndex = 0;
+
+    async function runNext(): Promise<void> {
+      while (nextIndex < tasks.length) {
+        const idx = nextIndex++;
+        if (signal?.aborted) {
+          throw new Error('提取已取消');
+        }
+        results[idx] = await tasks[idx]();
+      }
+    }
+
+    const workers = Array.from({ length: Math.min(concurrency, tasks.length) }, () => runNext());
+    await Promise.all(workers);
+    return results;
+  }
+
   private async generateWikiPages(
     analysis: AnalysisReport,
     sourceMaterial: string,
@@ -262,9 +308,9 @@ export class WikiEngine {
       },
     ], 4096, signal);
 
-    // --- Per-concept generation (one LLM call each) ---
-    const concepts: IngestLlmOutput['concepts'] = [];
-    for (const concept of analysis.concepts ?? []) {
+    // --- Per-concept generation (concurrent, up to 3 simultaneous) ---
+    const allConcepts = analysis.concepts ?? [];
+    const conceptTasks = allConcepts.map((concept) => async () => {
       if (signal?.aborted) throw new Error('提取已取消');
       try {
         const existingContent = !concept.isNew && concept.relatedExisting.length > 0
@@ -305,18 +351,18 @@ export class WikiEngine {
             ].join('\n'),
           },
         ], 4096, signal);
-        concepts.push(result);
         console.log(`[WikiEngine] Phase 2: generated concept "${result.title || concept.name}" (${(result.content || '').length} chars)`);
+        return result;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[WikiEngine] Failed to generate concept "${concept.name}": ${msg}`);
-        concepts.push({ title: concept.name, content: '', tags: [], difficulty: undefined });
+        return { title: concept.name, content: '', tags: [], difficulty: undefined };
       }
-    }
+    });
 
-    // --- Per-entity generation (one LLM call each) ---
-    const entities: IngestLlmOutput['entities'] = [];
-    for (const entity of analysis.entities ?? []) {
+    // --- Per-entity generation (concurrent, up to 3 simultaneous) ---
+    const allEntities = analysis.entities ?? [];
+    const entityTasks = allEntities.map((entity) => async () => {
       if (signal?.aborted) throw new Error('提取已取消');
       try {
         const existingContent = !entity.isNew && entity.relatedExisting.length > 0
@@ -357,14 +403,20 @@ export class WikiEngine {
             ].join('\n'),
           },
         ], 4096, signal);
-        entities.push(result);
         console.log(`[WikiEngine] Phase 2: generated entity "${result.title || entity.name}" (${(result.content || '').length} chars)`);
+        return result;
       } catch (err: unknown) {
         const msg = err instanceof Error ? err.message : String(err);
         console.error(`[WikiEngine] Failed to generate entity "${entity.name}": ${msg}`);
-        entities.push({ title: entity.name, content: '', tags: [], entityType: undefined });
+        return { title: entity.name, content: '', tags: [], entityType: undefined };
       }
-    }
+    });
+
+    // Run concept and entity tasks concurrently with a limit of 2 simultaneous LLM calls per group
+    const [concepts, entities] = await Promise.all([
+      this.runWithConcurrency(conceptTasks, 2, signal),
+      this.runWithConcurrency(entityTasks, 2, signal),
+    ]);
 
     return {
       docTitle: analysis.docTitle,
@@ -525,7 +577,7 @@ export class WikiEngine {
           fs.writeFileSync(conceptPath, `${fm}\n${bodyWithLinks}`, 'utf-8');
           result.conceptsCount++;
           result.pagesCreated++;
-          result.newPages.push({ title: conceptTitle, kind: 'concept', desc: concept.content.slice(0, 80) });
+          result.newPages.push({ title: conceptTitle, kind: 'concept', desc: conceptContent.slice(0, 80) });
         } catch (writeErr: unknown) {
           const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
           console.error(`[WikiEngine] Failed to write concept "${concept.title}": ${msg}`);
@@ -571,7 +623,7 @@ export class WikiEngine {
           fs.writeFileSync(entityPath, `${fm}\n${bodyWithLinks}`, 'utf-8');
           result.entitiesCount++;
           result.pagesCreated++;
-          result.newPages.push({ title: entityTitle, kind: 'entity', desc: entity.description.slice(0, 80) });
+          result.newPages.push({ title: entityTitle, kind: 'entity', desc: entityContent.slice(0, 80) });
         } catch (writeErr: unknown) {
           const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
           console.error(`[WikiEngine] Failed to write entity "${entity.title}": ${msg}`);
@@ -955,12 +1007,14 @@ export class WikiEngine {
 
   private async buildReport(): Promise<string> {
     const allPages = this.readAllWikiPages();
+    console.log(`[WikiEngine] buildReport: readAllWikiPages returned ${allPages.length} pages`);
     const skipPrefixes = ['index.md', 'log.md', '_review'];
     const pages = allPages.filter((p) => {
       const fileName = path.basename(p.path, '.md');
       const dir = p.path.includes('_review');
       return !skipPrefixes.some((s) => fileName === s || p.path.includes(`/${s}`) || p.path.includes(`\\${s}`)) && !dir;
     });
+    console.log(`[WikiEngine] buildReport: after filtering, ${pages.length} pages remain`);
 
     if (pages.length === 0) {
       return '# 知识报告\n\n知识库中暂无有效页面，无法生成报告。';

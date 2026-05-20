@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import React, { useCallback, forwardRef, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   BookOpen,
@@ -106,6 +106,62 @@ function findMatchingPage(
   return undefined;
 }
 
+interface KbCreateFormProps {
+  loading: boolean;
+  onCreate: (name: string, description: string) => void;
+  onCancel: () => void;
+}
+
+const KbCreateForm = React.memo(forwardRef<HTMLInputElement, KbCreateFormProps>(function KbCreateForm(props, ref) {
+  const { t } = useTranslation();
+  const [name, setName] = useState('');
+  const [desc, setDesc] = useState('');
+
+  useEffect(() => {
+    setName('');
+    setDesc('');
+  }, []);
+
+  const canSubmit = name.trim().length > 0 && !props.loading;
+
+  return (
+    <div className="px-6 py-4 border-b border-border bg-muted/30 flex-shrink-0">
+      <div className="flex items-center gap-3">
+        <input
+          ref={ref}
+          type="text"
+          value={name}
+          onChange={(e) => setName(e.target.value)}
+          placeholder={t('kb.namePlaceholder')}
+          className="flex-1 px-3 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
+          onKeyDown={(e) => e.key === 'Enter' && canSubmit && props.onCreate(name, desc)}
+        />
+        <input
+          type="text"
+          value={desc}
+          onChange={(e) => setDesc(e.target.value)}
+          placeholder={t('kb.descPlaceholder')}
+          className="flex-1 px-3 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
+          onKeyDown={(e) => e.key === 'Enter' && canSubmit && props.onCreate(name, desc)}
+        />
+        <button
+          onClick={() => canSubmit && props.onCreate(name, desc)}
+          disabled={!canSubmit}
+          className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
+        >
+          {t('kb.create')}
+        </button>
+        <button
+          onClick={props.onCancel}
+          className="px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
+        >
+          {t('kb.cancel')}
+        </button>
+      </div>
+    </div>
+  );
+}));
+
 export function KnowledgePage() {
   const { t } = useTranslation();
   const currentSpace = useSpaceStore((state) => state.currentSpace);
@@ -119,6 +175,7 @@ export function KnowledgePage() {
     loadingAction,
     error,
     ingestProgress,
+    ingestingKbId,
     loadKnowledgeBases,
     createKnowledgeBase,
     deleteKnowledgeBase,
@@ -146,8 +203,8 @@ export function KnowledgePage() {
   const [queryCited, setQueryCited] = useState<string[]>([]);
   const [reportContent, setReportContent] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
-  const [newKbName, setNewKbName] = useState('');
-  const [newKbDesc, setNewKbDesc] = useState('');
+  const hideCreateForm = useCallback(() => setShowCreateForm(false), []);
+
   const [expandedPage, setExpandedPage] = useState<string | null>(null);
   const [pageContent, setPageContent] = useState('');
   const [activeTab, setActiveTab] = useState<'sources' | 'pages' | 'query' | 'index' | 'graph' | 'lint' | 'report'>('sources');
@@ -156,6 +213,40 @@ export function KnowledgePage() {
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
   const [pageLinks, setPageLinks] = useState<{ outgoing: string[]; incoming: string[] }>({ outgoing: [], incoming: [] });
   const [indexContent, setIndexContent] = useState('');
+  const [editingDescKbId, setEditingDescKbId] = useState<string | null>(null);
+  const [editDescValue, setEditDescValue] = useState('');
+  const editDescRef = useRef<HTMLTextAreaElement>(null);
+
+  const startEditDesc = useCallback((kbId: string, desc: string) => {
+    setEditingDescKbId(kbId);
+    setEditDescValue(desc || '');
+  }, []);
+
+  const saveEditDesc = useCallback(async (kbId: string, value: string) => {
+    const trimmed = value.trim();
+    try {
+      const kbApi = await import('@/api/knowledge-base');
+      await kbApi.kbUpdate(kbId, { description: trimmed });
+    } catch { /* ignore */ }
+    const { currentKb, knowledgeBases } = useKnowledgeBaseStore.getState();
+    if (currentKb?.id === kbId) {
+      useKnowledgeBaseStore.setState({ currentKb: { ...currentKb, description: trimmed || undefined } });
+    }
+    const idx = knowledgeBases.findIndex((kb) => kb.id === kbId);
+    if (idx !== -1) {
+      const updated = [...knowledgeBases];
+      updated[idx] = { ...updated[idx], description: trimmed || undefined };
+      useKnowledgeBaseStore.setState({ knowledgeBases: updated });
+    }
+    setEditingDescKbId(null);
+    setEditDescValue('');
+  }, []);
+
+  useEffect(() => {
+    if (editingDescKbId) {
+      editDescRef.current?.focus();
+    }
+  }, [editingDescKbId]);
   const [graphData, setGraphData] = useState<{ nodes: Array<{ id: string; title: string; type: string; tags: string[] }>; links: Array<{ source: string; target: string }> } | null>(null);
   const [selectedSources, setSelectedSources] = useState<Set<string>>(new Set());
   const [selectedPages, setSelectedPages] = useState<Set<string>>(new Set());
@@ -172,6 +263,19 @@ export function KnowledgePage() {
     }
   }, [showCreateForm]);
 
+  const resetWikiView = useCallback(() => {
+    setGraphData(null);
+    setLintResult(null);
+    setReportContent(null);
+    setQueryAnswer('');
+    setQueryCited([]);
+    setQueryInput('');
+    setExpandedPage(null);
+    setPageContent('');
+    setPageLinks({ outgoing: [], incoming: [] });
+    setEditingPagePath(null);
+  }, []);
+
   useEffect(() => {
     if (currentKb) {
       // If navigating from a citation click, don't reset to sources tab
@@ -179,6 +283,7 @@ export function KnowledgePage() {
       if (!pending) {
         setActiveTab('sources');
       }
+      resetWikiView();
       loadSources(currentKb.id);
       loadWikiPages(currentKb.id).then(() => {
         const p = useKnowledgeBaseStore.getState().pendingPageExpand;
@@ -204,17 +309,32 @@ export function KnowledgePage() {
           }
         }
       });
-      setGraphData(null);
-      setLintResult(null);
-      setQueryAnswer('');
-      setQueryCited([]);
-      setQueryInput('');
       (async () => {
         const cached = await loadReport(currentKb.id);
         setReportContent(cached);
       })();
     }
   }, [currentKb, loadSources, loadWikiPages, t]);
+
+  useEffect(() => {
+    if (wikiUpdatedCounter > 0) {
+      setReportContent(null);
+    }
+  }, [wikiUpdatedCounter]);
+
+  useEffect(() => {
+    if (activeTab === 'report' && !reportContent && !ingestingKbId && currentKb && loadingAction !== 'report' && wikiPages.length > 0) {
+      (async () => {
+        const cached = await loadReport(currentKb.id);
+        if (cached) {
+          setReportContent(cached);
+          return;
+        }
+        const result = await generateReport(currentKb.id);
+        if (result) setReportContent(result);
+      })();
+    }
+  }, [activeTab, reportContent, ingestingKbId, currentKb, loadingAction, loadReport, generateReport]);
 
   useEffect(() => {
     if (wikiUpdatedCounter > 0 && currentKb && activeTab === 'graph') {
@@ -226,15 +346,13 @@ export function KnowledgePage() {
     }
   }, [wikiUpdatedCounter, currentKb, activeTab]);
 
-  const handleCreate = async () => {
-    if (!newKbName.trim()) return;
-    await createKnowledgeBase({ name: newKbName.trim(), description: newKbDesc.trim() || undefined });
+  const handleCreateWithName = useCallback(async (name: string, description: string) => {
+    if (!name.trim()) return;
+    await createKnowledgeBase({ name: name.trim(), description: description.trim() || undefined });
     if (!useKnowledgeBaseStore.getState().error) {
-      setNewKbName('');
-      setNewKbDesc('');
       setShowCreateForm(false);
     }
-  };
+  }, [createKnowledgeBase]);
 
   const handleDelete = async (id: string, name: string) => {
     const confirmed = window.confirm(t('kb.deleteConfirm', { name }));
@@ -282,6 +400,8 @@ export function KnowledgePage() {
       setPageContent('');
       setPageLinks({ outgoing: [], incoming: [] });
     }
+    setGraphData(null);
+    setReportContent(null);
     loadWikiPages(kbId);
   };
 
@@ -329,40 +449,13 @@ export function KnowledgePage() {
       </div>
 
       {showCreateForm && (
-        <div className="px-6 py-4 border-b border-border bg-muted/30 flex-shrink-0">
-          <div className="flex items-center gap-3">
-            <input
-              ref={createNameRef}
-              type="text"
-              value={newKbName}
-              onChange={(e) => setNewKbName(e.target.value)}
-              placeholder={t('kb.namePlaceholder')}
-              className="flex-1 px-3 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
-              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-            />
-            <input
-              type="text"
-              value={newKbDesc}
-              onChange={(e) => setNewKbDesc(e.target.value)}
-              placeholder={t('kb.descPlaceholder')}
-              className="flex-1 px-3 py-1.5 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
-              onKeyDown={(e) => e.key === 'Enter' && handleCreate()}
-            />
-            <button
-              onClick={handleCreate}
-              disabled={!newKbName.trim() || loading}
-              className="px-3 py-1.5 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
-            >
-              {t('kb.create')}
-            </button>
-            <button
-              onClick={() => { setShowCreateForm(false); setNewKbName(''); setNewKbDesc(''); }}
-              className="px-3 py-1.5 text-sm text-muted-foreground hover:text-foreground transition-colors"
-            >
-              {t('kb.cancel')}
-            </button>
-          </div>
-        </div>
+        <KbCreateForm
+          key="kb-create-form"
+          ref={createNameRef}
+          loading={loading}
+          onCreate={handleCreateWithName}
+          onCancel={hideCreateForm}
+        />
       )}
 
       {error && (
@@ -379,30 +472,39 @@ export function KnowledgePage() {
         </div>
       )}
 
-      {ingestProgress && (
+      {ingestingKbId && (
         <div className="mx-6 mt-3 px-4 py-3 rounded-lg border border-border bg-muted/30 flex-shrink-0">
-          <div className="flex items-center justify-between mb-2">
+          {ingestProgress ? (
+            <>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-2 text-sm">
+                  <Loader2 className="w-4 h-4 animate-spin text-primary" />
+                  <span>{t('kb.ingesting', { current: ingestProgress.current, total: ingestProgress.total, fileName: ingestProgress.fileName })}</span>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-xs text-muted-foreground">{ingestProgress.current}/{ingestProgress.total}</span>
+                </div>
+              </div>
+              <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+                <div
+                  className="h-full bg-primary rounded-full transition-all duration-300"
+                  style={{ width: `${(ingestProgress.current / ingestProgress.total) * 100}%` }}
+                />
+              </div>
+            </>
+          ) : (
             <div className="flex items-center gap-2 text-sm">
               <Loader2 className="w-4 h-4 animate-spin text-primary" />
-              <span>{t('kb.ingesting', { current: ingestProgress.current, total: ingestProgress.total, fileName: ingestProgress.fileName })}</span>
+              <span>{t('kb.preparing')}</span>
             </div>
-            <div className="flex items-center gap-2">
-              {(loadingAction === 'ingest' || loadingAction === 'fullIngest') && currentKb && (
-                <button
-                  onClick={() => cancelIngest(currentKb.id)}
-                  className="text-xs text-muted-foreground hover:text-destructive transition-colors px-2 py-0.5 rounded hover:bg-destructive/10"
-                >
-                  {t('kb.cancelIngest')}
-                </button>
-              )}
-              <span className="text-xs text-muted-foreground">{ingestProgress.current}/{ingestProgress.total}</span>
-            </div>
-          </div>
-          <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-            <div
-              className="h-full bg-primary rounded-full transition-all duration-300"
-              style={{ width: `${(ingestProgress.current / ingestProgress.total) * 100}%` }}
-            />
+          )}
+          <div className="mt-2 flex justify-end">
+            <button
+              onClick={() => cancelIngest()}
+              className="text-xs text-muted-foreground hover:text-destructive transition-colors px-2 py-0.5 rounded hover:bg-destructive/10"
+            >
+              {t('kb.cancelIngest')}
+            </button>
           </div>
         </div>
       )}
@@ -416,7 +518,7 @@ export function KnowledgePage() {
               knowledgeBases.map((kb) => (
                 <button
                   key={kb.id}
-                  onClick={() => selectKb(kb)}
+                  onClick={() => editingDescKbId === kb.id ? undefined : selectKb(kb)}
                   className={`w-full text-left px-3 py-2.5 rounded-lg transition-colors ${
                     currentKb?.id === kb.id
                       ? 'bg-primary/10 text-primary'
@@ -427,10 +529,28 @@ export function KnowledgePage() {
                     <span className="text-sm font-medium truncate">{kb.name}</span>
                     <FileText className="w-3.5 h-3.5 text-muted-foreground flex-shrink-0" />
                   </div>
-                  <div className="flex items-center gap-3 mt-1 text-xs text-muted-foreground">
-                    <span>{kb.pageCount} {t('kb.wikiPages')}</span>
-                    <span>{kb.sourceCount} {t('kb.sources')}</span>
-                  </div>
+                  {editingDescKbId === kb.id ? (
+                    <div className="mt-1.5" onClick={(e) => e.stopPropagation()}>
+                      <textarea
+                        ref={editDescRef}
+                        value={editDescValue}
+                        onChange={(e) => setEditDescValue(e.target.value)}
+                        onBlur={() => saveEditDesc(kb.id, editDescValue)}
+                        onKeyDown={(e) => {
+                          if (e.key === 'Escape') { e.preventDefault(); setEditingDescKbId(null); setEditDescValue(''); }
+                        }}
+                        rows={2}
+                        className="w-full px-2 py-1 text-xs bg-background border border-border rounded focus:outline-none focus:ring-1 focus:ring-primary resize-none"
+                      />
+                    </div>
+                  ) : (
+                    <p
+                      className="mt-1 text-xs text-muted-foreground line-clamp-2 cursor-text"
+                      onDoubleClick={(e) => { e.stopPropagation(); startEditDesc(kb.id, kb.description || ''); }}
+                    >
+                      {kb.description || <span className="italic opacity-50">{t('kb.doubleClickEdit')}</span>}
+                    </p>
+                  )}
                 </button>
               ))
             )}
@@ -490,6 +610,7 @@ export function KnowledgePage() {
                 <button
                   onClick={() => {
                     if (!window.confirm(t('kb.recompileConfirm'))) return;
+                    resetWikiView();
                     recompile(currentKb.id);
                   }}
                   disabled={loadingAction === 'recompile'}
@@ -546,9 +667,9 @@ export function KnowledgePage() {
                           const kbApi = await import('@/api/knowledge-base');
                           const res = await kbApi.kbReadPage(kbId, 'index.md');
                           if (res.success) setIndexContent(res.data as string);
-                          else setIndexContent(`Error: ${res.error}`);
+                          else setIndexContent('');
                         } catch {
-                          setIndexContent('Failed to load index');
+                          setIndexContent('');
                         }
                       })();
                     }}
@@ -583,21 +704,7 @@ export function KnowledgePage() {
                     {t('kb.knowledgeGraph')}
                   </button>
                   <button
-                    onClick={() => {
-                      setActiveTab('report');
-                      if (!reportContent) {
-                        (async () => {
-                          if (!currentKb) return;
-                          const cached = await loadReport(currentKb.id);
-                          if (cached) {
-                            setReportContent(cached);
-                            return;
-                          }
-                          const result = await generateReport(currentKb.id);
-                          if (result) setReportContent(result);
-                        })();
-                      }
-                    }}
+                    onClick={() => setActiveTab('report')}
                     className={`px-3 py-2 text-sm transition-colors ${
                       activeTab === 'report'
                         ? 'border-b-2 border-primary text-foreground font-medium'
@@ -923,10 +1030,16 @@ export function KnowledgePage() {
               {activeTab === 'index' && (
                 <div className="max-h-[60vh] overflow-y-auto">
                   {!indexContent || indexContent === t('kb.loading') ? (
-                    <div className="flex flex-col items-center justify-center py-12">
-                      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground mb-3" />
-                      <span className="text-sm text-muted-foreground">{t('kb.loading')}</span>
-                    </div>
+                    wikiPages.length === 0 ? (
+                      <div className="text-sm text-muted-foreground text-center py-12">
+                        {t('kb.noWikiForIndex')}
+                      </div>
+                    ) : (
+                      <div className="flex flex-col items-center justify-center py-12">
+                        <Loader2 className="w-6 h-6 animate-spin text-muted-foreground mb-3" />
+                        <span className="text-sm text-muted-foreground">{t('kb.loading')}</span>
+                      </div>
+                    )
                   ) : (() => {
                     const lines = indexContent.trim().split('\n');
                     const groups: Array<{ heading: string; items: Array<{ title: string; desc: string }> }> = [];
@@ -1205,9 +1318,14 @@ export function KnowledgePage() {
                     <div className="rounded-lg border border-border max-h-[600px] overflow-y-auto">
                       <ReportContent content={reportContent} />
                     </div>
-                  ) : (
+                  ) : wikiPages.length === 0 ? (
                     <div className="text-sm text-muted-foreground text-center py-12">
-                      {t('kb.reportHint')}
+                      {t('kb.noWikiForReport')}
+                    </div>
+                  ) : (
+                    <div className="flex items-center justify-center py-12">
+                      <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                      <span className="ml-2 text-sm text-muted-foreground">{t('kb.reportGenerating')}</span>
                     </div>
                   )}
                 </div>

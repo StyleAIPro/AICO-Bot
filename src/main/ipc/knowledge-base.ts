@@ -261,6 +261,7 @@ export function registerKnowledgeBaseHandlers(): void {
 
         svc.crossLinkAllPages(kbId);
         svc.recountPages(kbId);
+        svc.clearReportCache(kbId);
       }
 
       return { success: true, data: total };
@@ -327,6 +328,7 @@ export function registerKnowledgeBaseHandlers(): void {
           engine.crossLinkAllPages();
         }
         svc.recountPages(kbId);
+        svc.clearReportCache(kbId);
       }
 
       return { success: true, data: total };
@@ -356,7 +358,12 @@ export function registerKnowledgeBaseHandlers(): void {
 
     try {
       const svc = getKnowledgeBaseService();
+      console.log('[KB_RECOMPILE] Starting recompile, clearing generated content...');
+      svc.clearGeneratedContent(kbId);
+      console.log('[KB_RECOMPILE] Content cleared, resetting source statuses...');
+      svc.resetSourceStatuses(kbId);
       const sources = svc.listSources(kbId);
+      console.log(`[KB_RECOMPILE] Sources loaded: ${sources.length} files`);
       const total: IngestResult = {
         pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0,
         summaryCreated: false, errors: [], newPages: [],
@@ -396,11 +403,13 @@ export function registerKnowledgeBaseHandlers(): void {
 
         svc.crossLinkAllPages(kbId);
         svc.recountPages(kbId);
+        svc.clearReportCache(kbId);
       }
 
       return { success: true, data: total };
     } catch (error: unknown) {
       const err = error as Error;
+      console.error(`[KB_RECOMPILE] Error: ${err.message}`, err.stack);
       return { success: false, error: err.message };
     } finally {
       activeControllers.delete(kbId);
@@ -546,6 +555,7 @@ export function registerKnowledgeBaseHandlers(): void {
     try {
       const svc = getKnowledgeBaseService();
       svc.deleteWikiPage(kbId, pagePath);
+      svc.clearReportCache(kbId);
       return { success: true };
     } catch (error: unknown) {
       const err = error as Error;

@@ -470,6 +470,12 @@ export class KnowledgeBaseService {
   /**
    * Cross-link all wiki pages without LLM — just scans titles and injects wikilinks.
    */
+  clearGeneratedContent(kbId: string): void {
+    const kbPath = this.getKbPath(kbId);
+    const engine = new WikiEngine(kbPath, null as unknown as KbLlmCaller);
+    engine.clearGeneratedContent();
+  }
+
   crossLinkAllPages(kbId: string): void {
     const kbPath = this.getKbPath(kbId);
     const engine = new WikiEngine(kbPath, null as unknown as KbLlmCaller);
@@ -703,6 +709,18 @@ export class KnowledgeBaseService {
     ).run(kbId);
   }
 
+  resetSourceStatuses(kbId: string): void {
+    this.db.prepare(
+      "UPDATE kb_sources SET status = 'pending', error_message = '', ingested_at = NULL, compiled_at = NULL WHERE kb_id = ?",
+    ).run(kbId);
+  }
+
+  clearReportCache(kbId: string): void {
+    const kbPath = this.getKbPath(kbId);
+    const reportPath = path.join(kbPath, 'wiki', '_report.md');
+    if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
+  }
+
   recountPages(kbId: string): void {
     const count = this.listWikiPages(kbId).length;
     this.db.prepare(
@@ -865,7 +883,7 @@ export class KnowledgeBaseService {
     const kbPath = this.getKbPath(kbId);
     const fullPath = path.join(kbPath, 'wiki', pagePath);
     if (!fs.existsSync(fullPath)) {
-      throw new Error(`Wiki page not found: ${pagePath}`);
+      throw new Error(`未找到 Wiki 页面: ${pagePath}`);
     }
     return fs.readFileSync(fullPath, 'utf-8');
   }
@@ -874,7 +892,7 @@ export class KnowledgeBaseService {
     const kbPath = this.getKbPath(kbId);
     const fullPath = path.join(kbPath, 'wiki', pagePath);
     if (!fs.existsSync(fullPath)) {
-      throw new Error(`Wiki page not found: ${pagePath}`);
+      throw new Error(`未找到 Wiki 页面: ${pagePath}`);
     }
     fs.writeFileSync(fullPath, content, 'utf-8');
     const reportPath = path.join(kbPath, 'wiki', '_report.md');
@@ -885,7 +903,7 @@ export class KnowledgeBaseService {
     const kbPath = this.getKbPath(kbId);
     const fullPath = path.join(kbPath, 'wiki', pagePath);
     if (!fs.existsSync(fullPath)) {
-      throw new Error(`Wiki page not found: ${pagePath}`);
+      throw new Error(`未找到 Wiki 页面: ${pagePath}`);
     }
     fs.unlinkSync(fullPath);
 
@@ -913,7 +931,7 @@ export class KnowledgeBaseService {
 
     const targetFullPath = path.resolve(wikiDir, pagePath);
     if (!fs.existsSync(targetFullPath)) {
-      throw new Error(`Wiki page not found: ${pagePath}`);
+      throw new Error(`未找到 Wiki 页面: ${pagePath}`);
     }
 
     const pageContent = fs.readFileSync(targetFullPath, 'utf-8');
