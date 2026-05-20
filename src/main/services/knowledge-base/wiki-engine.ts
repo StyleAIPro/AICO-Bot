@@ -10,6 +10,7 @@ import type {
   KbSource,
 } from './types';
 import { KbLlmCaller } from './llm-caller';
+import { getAicoBotDir } from '../config.service';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -26,6 +27,20 @@ const STOP_WORDS = new Set([
   'if', 'while', 'about', 'it', 'its', 'this', 'that', 'these', 'those',
   'i', 'me', 'my', 'we', 'our', 'you', 'your', 'he', 'him', 'his',
   'she', 'her', 'they', 'them', 'their', 'what', 'which', 'who',
+]);
+
+// Chinese function words — single characters that carry no semantic meaning
+const CHINESE_STOP_CHARS = new Set(
+  '的了是在有不和与也很都而却能可要会就将及或被把给让向从到得着过这那哪个什么怎么为什么吗吧呢啊哦嗯呀啦嘛嘛哈么些种样条件个位次回遍场份篇段节级层类组批套系列号版款代'
+    .split('')
+);
+
+// Chinese function-word bigrams — composed entirely of stop chars, no retrieval value
+const CHINESE_STOP_BIGRAMS = new Set([
+  '的是', '是了', '的了', '是在', '是在', '是有', '的也', '和也',
+  '也能', '也可', '是也', '是不', '不是', '的有', '和有', '与有',
+  '的了', '的是', '也能', '也可', '会也', '将会', '也会', '也有',
+  '在也', '在有', '是不是', '能不能', '会不会', '可不可以',
 ]);
 
 const WIKI_SUBDIRS = ['concepts', 'entities', 'summaries', 'conversations'] as const;
@@ -88,6 +103,13 @@ export class WikiEngine {
   private kbPath: string;
   private llm: KbLlmCaller;
   private titleCache: Map<string, TitleCacheEntry> | null;
+
+  // --- Inverted index cache ---
+  private indexCache: Map<string, { pageKey: string; field: 'title' | 'tag' | 'body' }[]> | null = null;
+  private pageMetaCache: Map<string, { path: string; title: string; type: PageKind; tags: string[] }> | null = null;
+
+  // --- Synonym expansion cache ---
+  private synonymCache: string[][] | null = null;
 
   constructor(kbPath: string, llm: KbLlmCaller) {
     this.kbPath = kbPath;
@@ -396,10 +418,11 @@ export class WikiEngine {
     content: string,
     onProgress?: (chunkIndex: number, totalChunks: number) => void,
     signal?: AbortSignal,
+    skipIndexUpdate = false,
   ): Promise<IngestResult> {
     const result: IngestResult = {
       pagesCreated: 0, pagesUpdated: 0,
-      conceptsCount: 0, entitiesCount: 0, summaryCreated: false, errors: [],
+      conceptsCount: 0, entitiesCount: 0, summaryCreated: false, errors: [], newPages: [],
     };
 
     try {
@@ -449,6 +472,7 @@ export class WikiEngine {
       fs.writeFileSync(summaryPath, `${summaryFrontmatter}\n${this.truncateContent(generation.summary)}${keyPointsSection}`, 'utf-8');
       result.summaryCreated = true;
       result.pagesCreated++;
+      result.newPages.push({ title: `${docTitle} - Summary`, kind: 'summary', desc: docTitle });
 
       // Concepts + Entities
       const allTitles = [
@@ -501,6 +525,7 @@ export class WikiEngine {
           fs.writeFileSync(conceptPath, `${fm}\n${bodyWithLinks}`, 'utf-8');
           result.conceptsCount++;
           result.pagesCreated++;
+          result.newPages.push({ title: conceptTitle, kind: 'concept', desc: concept.content.slice(0, 80) });
         } catch (writeErr: unknown) {
           const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
           console.error(`[WikiEngine] Failed to write concept "${concept.title}": ${msg}`);
@@ -546,6 +571,7 @@ export class WikiEngine {
           fs.writeFileSync(entityPath, `${fm}\n${bodyWithLinks}`, 'utf-8');
           result.entitiesCount++;
           result.pagesCreated++;
+          result.newPages.push({ title: entityTitle, kind: 'entity', desc: entity.description.slice(0, 80) });
         } catch (writeErr: unknown) {
           const msg = writeErr instanceof Error ? writeErr.message : String(writeErr);
           console.error(`[WikiEngine] Failed to write entity "${entity.title}": ${msg}`);
@@ -559,7 +585,7 @@ export class WikiEngine {
         this.appendReviewItems(source, reviewItems);
       }
 
-      this.updateIndex();
+      if (!skipIndexUpdate) this.updateIndex();
       console.log(`[WikiEngine] Ingest done: summary=${result.summaryCreated}, concepts=${result.conceptsCount}, entities=${result.entitiesCount}, pages=${result.pagesCreated}, updated=${result.pagesUpdated}`);
       this.appendLog('ingest', `${source.storedName} → ${docTitle}`, `created=${result.pagesCreated}, updated=${result.pagesUpdated}, concepts=${result.conceptsCount}, entities=${result.entitiesCount}`);
     } catch (err: unknown) {
@@ -621,7 +647,8 @@ export class WikiEngine {
 
     const pageSummaries = allPages.map((p) => {
       const wordCount = p.content.split(/\s+/).filter(Boolean).length;
-      return `### ${p.title} (${p.type})\nPath: ${p.path}\nWords: ${wordCount}\n${p.content.slice(0, 300)}\n---`;
+      const content = p.content.length > 3000 ? p.content.slice(0, 3000) + '\n... (truncated)' : p.content;
+      return `### ${p.title} (${p.type})\nPath: ${p.path}\nWords: ${wordCount}\n${content}\n---`;
     });
 
     const suggestions: CompileSuggestion[] = await this.llm.chatWithJson<CompileSuggestion[]>([
@@ -688,8 +715,10 @@ export class WikiEngine {
     ]);
 
     const citations = this.extractCitations(answer);
+    // Strip wikilink syntax from display answer: [[Title|alias]] → Title
+    const displayAnswer = answer.replace(/\[\[([^\[\]]+)\]\]/g, (_, content) => content.split('|')[0].trim());
     this.appendLog('query', question.slice(0, 80), `cited: [${citations.join(', ')}]`);
-    return { answer, citedPages: citations };
+    return { answer: displayAnswer, citedPages: citations };
   }
 
   /**
@@ -718,120 +747,427 @@ export class WikiEngine {
   }
 
   // ---------------------------------------------------------------------------
+  // Report
+  // ---------------------------------------------------------------------------
+
+  async generateReport(): Promise<string> {
+    const report = await this.buildReport();
+    const reportPath = path.join(this.kbPath, 'wiki', '_report.md');
+    fs.writeFileSync(reportPath, report, 'utf-8');
+    this.appendLog('report', `generated and cached, ${report.length} chars`);
+    return report;
+  }
+
+  loadReport(): string | null {
+    const reportPath = path.join(this.kbPath, 'wiki', '_report.md');
+    if (!fs.existsSync(reportPath)) return null;
+    return fs.readFileSync(reportPath, 'utf-8');
+  }
+
+  private clearReportCache(): void {
+    const reportPath = path.join(this.kbPath, 'wiki', '_report.md');
+    if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
+    this.invalidateSearchIndex();
+  }
+
+  private invalidateSearchIndex(): void {
+    this.indexCache = null;
+    this.pageMetaCache = null;
+  }
+
+  // ---------------------------------------------------------------------------
+  // Synonym expansion
+  // ---------------------------------------------------------------------------
+
+  /**
+   * Load synonym groups from global and per-KB synonym files.
+   * Format: JSON array of string arrays, each inner array is a group of equivalent terms.
+   * Example: [["波束赋形", "波束成形", "beamforming"], ["恒模约束", "CM约束"]]
+   */
+  private loadSynonyms(): string[][] {
+    if (this.synonymCache) return this.synonymCache;
+
+    this.synonymCache = [];
+
+    // Global synonyms: ~/.aico-bot/synonyms.json
+    const globalPath = path.join(getAicoBotDir(), 'synonyms.json');
+    if (fs.existsSync(globalPath)) {
+      try {
+        const raw = fs.readFileSync(globalPath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data)) {
+          for (const group of data) {
+            if (Array.isArray(group) && group.length >= 2 && group.every((t: unknown) => typeof t === 'string')) {
+              this.synonymCache.push(group);
+            }
+          }
+        }
+      } catch { /* ignore malformed file */ }
+    }
+
+    // Per-KB synonyms: <kbPath>/synonyms.json
+    const kbSynonymPath = path.join(this.kbPath, 'synonyms.json');
+    if (fs.existsSync(kbSynonymPath)) {
+      try {
+        const raw = fs.readFileSync(kbSynonymPath, 'utf-8');
+        const data = JSON.parse(raw);
+        if (Array.isArray(data)) {
+          for (const group of data) {
+            if (Array.isArray(group) && group.length >= 2 && group.every((t: unknown) => typeof t === 'string')) {
+              this.synonymCache.push(group);
+            }
+          }
+        }
+      } catch { /* ignore malformed file */ }
+    }
+
+    return this.synonymCache;
+  }
+
+  /**
+   * Check if a synonym term matches the query.
+   * English terms use word-boundary matching to avoid "reforming" matching "forming".
+   * Chinese terms use substring matching (characters are natural word boundaries).
+   */
+  private synonymMatchesQuery(term: string, queryLower: string): boolean {
+    if (/[a-zA-Z0-9]/.test(term)) {
+      const escaped = term.toLowerCase().replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      return new RegExp(`\\b${escaped}\\b`, 'i').test(queryLower);
+    }
+    return queryLower.includes(term.toLowerCase());
+  }
+
+  /**
+   * Build weighted keywords: original keywords (1.0) + synonym-expanded keywords (0.8).
+   * Expanded terms are tokenized through extractKeywords and deduplicated against originals.
+   */
+  private buildWeightedKeywords(query: string): Array<{ term: string; weight: number }> {
+    const originalKeywords = this.extractKeywords(query);
+    const result: Array<{ term: string; weight: number }> = originalKeywords.map((t) => ({ term: t, weight: 1.0 }));
+
+    const groups = this.loadSynonyms();
+    if (groups.length === 0) return result;
+
+    const queryLower = query.toLowerCase();
+    const originalSet = new Set(originalKeywords);
+
+    for (const group of groups) {
+      let matched = false;
+      for (const term of group) {
+        if (this.synonymMatchesQuery(term, queryLower)) {
+          matched = true;
+          break;
+        }
+      }
+      if (matched) {
+        for (const term of group) {
+          if (!this.synonymMatchesQuery(term, queryLower)) {
+            const expanded = this.extractKeywords(term);
+            for (const kw of expanded) {
+              if (!originalSet.has(kw)) {
+                originalSet.add(kw);
+                result.push({ term: kw, weight: 0.8 });
+              }
+            }
+          }
+        }
+      }
+    }
+
+    return result;
+  }
+
+  private ensureSearchIndex(): void {
+    if (this.indexCache) return;
+
+    const wikiDir = path.join(this.kbPath, 'wiki');
+    if (!fs.existsSync(wikiDir)) return;
+
+    this.indexCache = new Map();
+    this.pageMetaCache = new Map();
+
+    const mdFiles = this.readdirRecursive(wikiDir, '.md');
+
+    for (const filePath of mdFiles) {
+      const fileName = path.basename(filePath, '.md');
+      if (fileName === 'index' || fileName === 'log' || fileName === '_report') continue;
+      const relPath = path.relative(this.kbPath, filePath).replace(/\\/g, '/');
+      if (relPath.startsWith('wiki/_review/')) continue;
+
+      const raw = fs.readFileSync(filePath, 'utf-8');
+      const { frontmatter, body } = this.parseFrontmatter(raw);
+      const title = (frontmatter['title'] as string) ?? path.basename(filePath, '.md');
+      const type = (frontmatter['type'] as PageKind) ?? 'concept';
+      const tags = (frontmatter['tags'] as string[]) ?? [];
+      const pageKey = title.toLowerCase();
+
+      this.pageMetaCache.set(pageKey, { path: filePath, title, type, tags });
+
+      const addTerms = (text: string, field: 'title' | 'tag' | 'body') => {
+        for (const term of this.extractDocumentTerms(text)) {
+          const entries = this.indexCache.get(term) || [];
+          entries.push({ pageKey, field });
+          this.indexCache.set(term, entries);
+        }
+      };
+
+      addTerms(title, 'title');
+      for (const tag of tags) addTerms(tag, 'tag');
+      addTerms(body, 'body');
+    }
+  }
+
+  private extractDocumentTerms(text: string): string[] {
+    const terms: string[] = [];
+    const lower = text.toLowerCase();
+
+    const englishWords = lower.match(/[a-z0-9]{2,}/g) || [];
+    terms.push(...englishWords.filter((w) => !STOP_WORDS.has(w)));
+
+    const chineseSegments = text.match(/[一-鿿]+/g) || [];
+    for (const seg of chineseSegments) {
+      if (seg.length <= 4) {
+        terms.push(seg.toLowerCase());
+        continue;
+      }
+
+      for (let i = 0; i < seg.length - 1; i++) {
+        const bigram = seg.slice(i, i + 2).toLowerCase();
+        if (
+          CHINESE_STOP_BIGRAMS.has(bigram) ||
+          (CHINESE_STOP_CHARS.has(bigram[0]) && CHINESE_STOP_CHARS.has(bigram[1]))
+        ) {
+          continue;
+        }
+        terms.push(bigram);
+      }
+
+      for (let i = 0; i <= seg.length - 3; i++) {
+        const trigram = seg.slice(i, i + 3).toLowerCase();
+        if (!CHINESE_STOP_CHARS.has(trigram[0]) && !CHINESE_STOP_CHARS.has(trigram[2])) {
+          terms.push(trigram);
+        }
+      }
+    }
+
+    return terms;
+  }
+
+  private async buildReport(): Promise<string> {
+    const allPages = this.readAllWikiPages();
+    const skipPrefixes = ['index.md', 'log.md', '_review'];
+    const pages = allPages.filter((p) => {
+      const fileName = path.basename(p.path, '.md');
+      const dir = p.path.includes('_review');
+      return !skipPrefixes.some((s) => fileName === s || p.path.includes(`/${s}`) || p.path.includes(`\\${s}`)) && !dir;
+    });
+
+    if (pages.length === 0) {
+      return '# 知识报告\n\n知识库中暂无有效页面，无法生成报告。';
+    }
+
+    const summaries = pages.map((p) => {
+      const snippet = p.content.length > 300 ? p.content.slice(0, 300) + '...' : p.content;
+      return `[${p.type}] ${p.title}\nTags: ${p.tags.join(', ') || 'none'}\n${snippet}`;
+    }).join('\n\n---\n\n');
+
+    const prompt = [
+      {
+        role: 'system',
+        content: `你是一个知识库分析专家。基于以下 wiki 页面内容，生成一份专业的知识库分析报告。
+
+要求：
+1. 使用中文
+2. Markdown 格式，结构清晰
+3. 分为以下三个章节，每个章节用 ## 二级标题：
+
+## 知识概览
+- 用 2-3 句话概括知识库的核心主题和研究方向
+- 列出涵盖的主要领域（用列表形式，每项一行，格式：- **领域名**：一句话说明）
+
+## 知识结构分析
+- 识别知识库中的核心概念及其层次关系
+- 描述主要知识脉络和概念之间的关联
+- 用列表展示关键概念节点（格式：- **概念**：简要说明其在知识体系中的角色）
+
+## 知识覆盖度评估
+- 列出已充分覆盖的领域（格式：- ✅ **领域**：覆盖情况说明）
+- 列出覆盖不足或缺失的领域（格式：- ⚠️ **领域**：缺失说明 + 建议补充方向）
+
+4. 语言专业、简洁，避免空话套话
+5. 所有描述必须基于提供的页面内容，不要编造`,
+      },
+      {
+        role: 'user',
+        content: `知识库包含 ${pages.length} 个页面，其中 ${pages.filter(p => p.type === 'summary').length} 个文档摘要、${pages.filter(p => p.type === 'concept').length} 个概念页、${pages.filter(p => p.type === 'entity').length} 个实体页。内容如下：\n\n${summaries}`,
+      },
+    ];
+
+    const report = await this.llm.chat(prompt, 4000);
+    this.appendLog('report', `generated, ${report.length} chars`);
+    return report;
+  }
+
+  // ---------------------------------------------------------------------------
   // Lint
   // ---------------------------------------------------------------------------
 
-  async lint(): Promise<LintResult> {
+  async lint(existingSourceIds?: Set<string>): Promise<LintResult> {
     const wikiDir = path.join(this.kbPath, 'wiki');
     if (!fs.existsSync(wikiDir)) {
-      return { issues: [], totalPages: 0, deadLinks: 0, orphanPages: 0, healthScore: 100 };
+      return { issues: [], totalPages: 0, healthScore: 100 };
     }
 
     const mdFiles = this.readdirRecursive(wikiDir, '.md');
     const issues: LintIssue[] = [];
-
-    // Build title → filepath map and linked-set map
-    const titleToPath = new Map<string, string>();
-    const pageTitles = new Set<string>();
-    const linkedBy = new Map<string, Set<string>>();
-    const linkedTo = new Map<string, Set<string>>();
+    const pageInfo: Array<{
+      filePath: string;
+      title: string;
+      type: string;
+      body: string;
+      hasFrontmatter: boolean;
+      raw: string;
+      sources: string[];
+    }> = [];
 
     for (const filePath of mdFiles) {
       const raw = fs.readFileSync(filePath, 'utf-8');
       const { frontmatter, body } = this.parseFrontmatter(raw);
-      const title =
-        (frontmatter['title'] as string) ?? path.basename(filePath, '.md');
-      titleToPath.set(title, filePath);
-      pageTitles.add(title);
+      const title = (frontmatter['title'] as string) ?? '';
+      const type = (frontmatter['type'] as string) ?? '';
+      const hasFrontmatter = raw.startsWith('---');
+      const sources = Array.isArray(frontmatter['sources']) ? (frontmatter['sources'] as string[]) : [];
+      pageInfo.push({ filePath, title, type, body, hasFrontmatter, raw, sources });
+    }
 
-      // Parse wikilinks in body
-      const linkMatches = Array.from(body.matchAll(/\[\[([^\]]+)\]\]/g));
-      const outgoing = new Set<string>();
-      for (const match of linkMatches) {
-        outgoing.add(match[1]);
-      }
-      linkedTo.set(filePath, outgoing);
+    const skipFiles = new Set(['wiki/index.md', 'wiki/log.md', 'wiki/_report.md', 'wiki\\index.md', 'wiki\\log.md', 'wiki\\_report.md']);
+    const isSkipped = (relPath: string) => {
+      const normalized = relPath.replace(/\\/g, '/');
+      return skipFiles.has(normalized) || normalized.startsWith('wiki/_review/');
+    };
 
-      for (const target of Array.from(outgoing)) {
-        if (!linkedBy.has(target)) {
-          linkedBy.set(target, new Set());
-        }
-        linkedBy.get(target)!.add(filePath);
+    // 1. Missing or incomplete frontmatter
+    for (const p of pageInfo) {
+      const relPath = path.relative(this.kbPath, p.filePath);
+      if (isSkipped(relPath)) continue;
+      if (!p.hasFrontmatter) {
+        issues.push({
+          type: 'missing_frontmatter',
+          severity: 'warning',
+          file: relPath,
+          detail: 'Page has no frontmatter',
+        });
+      } else if (!p.title) {
+        issues.push({
+          type: 'missing_frontmatter',
+          severity: 'warning',
+          file: relPath,
+          detail: 'Frontmatter is missing "title" field',
+        });
       }
     }
 
-    // Dead links
-    for (const [file, targets] of Array.from(linkedTo)) {
-      for (const target of Array.from(targets)) {
-        if (!pageTitles.has(target)) {
+    // 2. Empty tags
+    for (const p of pageInfo) {
+      const relPath = path.relative(this.kbPath, p.filePath);
+      if (isSkipped(relPath)) continue;
+      if (!p.hasFrontmatter) continue;
+      const raw = p.raw;
+      const endIndex = raw.indexOf('---', 3);
+      if (endIndex === -1) continue;
+      const yamlBlock = raw.slice(3, endIndex);
+      const tagsMatch = yamlBlock.match(/tags:\s*\[([^\]]*)\]/);
+      const tagsEmpty = !tagsMatch || tagsMatch[1].trim().length === 0;
+      const noTagsKey = !yamlBlock.includes('tags:');
+      if (noTagsKey || tagsEmpty) {
+        const relPath = path.relative(this.kbPath, p.filePath);
+        issues.push({
+          type: 'empty_tags',
+          severity: 'warning',
+          file: relPath,
+          detail: 'Page has no tags assigned',
+        });
+      }
+    }
+
+    // 3. Empty or undersized body
+    for (const p of pageInfo) {
+      const relPath = path.relative(this.kbPath, p.filePath);
+      if (isSkipped(relPath)) continue;
+      const bodyLen = p.body.trim().length;
+      if (bodyLen < 100) {
+        const relPath = path.relative(this.kbPath, p.filePath);
+        issues.push({
+          type: bodyLen === 0 ? 'empty_body' : 'undersized_page',
+          severity: bodyLen === 0 ? 'error' : 'warning',
+          file: relPath,
+          detail: bodyLen === 0
+            ? 'Page body is empty'
+            : `Page body is too short (${bodyLen} chars, minimum 100)`,
+        });
+      }
+    }
+
+    // 4. Oversized pages (>1500 lines)
+    for (const p of pageInfo) {
+      const lineCount = p.raw.split('\n').length;
+      if (lineCount > 1500) {
+        const relPath = path.relative(this.kbPath, p.filePath);
+        issues.push({
+          type: 'oversized_page',
+          severity: 'warning',
+          file: relPath,
+          detail: `Page has ${lineCount} lines (threshold: 1500)`,
+        });
+      }
+    }
+
+    // 5. Missing source references
+    if (existingSourceIds) {
+      for (const p of pageInfo) {
+        const relPath = path.relative(this.kbPath, p.filePath);
+        if (isSkipped(relPath) || !p.hasFrontmatter) continue;
+        const missing = p.sources.filter((s) => !existingSourceIds.has(s));
+        if (missing.length > 0) {
           issues.push({
-            type: 'dead_link' as LintIssueType,
-            severity: 'error',
-            file: path.relative(this.kbPath, file),
-            detail: `Dead link: [[${target}]] — target page does not exist`,
+            type: 'missing_source',
+            severity: 'warning',
+            file: relPath,
+            detail: `${missing.length} source(s) no longer exist: ${missing.join(', ')}`,
           });
         }
       }
     }
 
-    // Orphan pages (not linked by any other page)
-    for (const [file] of Array.from(linkedTo)) {
-      const title = (titleToPath as unknown as Map<string, string>).get(
-        path.basename(file, '.md'),
-      );
-      const isLinked = title ? linkedBy.has(title) : false;
-      const relPath = path.relative(this.kbPath, file);
-      const isIndex = relPath === path.join('wiki', 'index.md');
-      if (!isLinked && !isIndex) {
-        issues.push({
-          type: 'orphan_page' as LintIssueType,
-          severity: 'warning',
-          file: relPath,
-          detail: 'This page is not linked by any other page',
-        });
+    // 6. Duplicate titles — similar titles with same type
+    const titled = pageInfo.filter((p) => p.title.length > 0);
+    for (let i = 0; i < titled.length; i++) {
+      for (let j = i + 1; j < titled.length; j++) {
+        const a = titled[i];
+        const b = titled[j];
+        if (a.type !== b.type || a.type === '') continue;
+        const sim = this.titleSimilarity(a.title, b.title);
+        if (sim > 0.7) {
+          const relA = path.relative(this.kbPath, a.filePath);
+          const relB = path.relative(this.kbPath, b.filePath);
+          issues.push({
+            type: 'duplicate_title',
+            severity: 'warning',
+            file: relA,
+            detail: `Similar title to "${b.title}" (similarity: ${(sim * 100).toFixed(0)}%)`,
+            relatedFile: relB,
+          });
+        }
       }
     }
 
-    // Missing from index
-    const indexPath = path.join(wikiDir, 'index.md');
-    let indexContent = '';
-    if (fs.existsSync(indexPath)) {
-      indexContent = fs.readFileSync(indexPath, 'utf-8');
-    }
-    for (const [title, filePath] of Array.from(titleToPath)) {
-      if (!indexContent.includes(`[[${title}]]`) && !filePath.endsWith('index.md')) {
-        issues.push({
-          type: 'missing_index' as LintIssueType,
-          severity: 'warning',
-          file: path.relative(this.kbPath, filePath),
-          detail: `Page "${title}" is not listed in wiki/index.md`,
-        });
-      }
-    }
-
-    // Oversized pages (>5000 lines)
-    for (const filePath of mdFiles) {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      const lineCount = raw.split('\n').length;
-      if (lineCount > 5000) {
-        issues.push({
-          type: 'oversized_page' as LintIssueType,
-          severity: 'warning',
-          file: path.relative(this.kbPath, filePath),
-          detail: `Page has ${lineCount} lines (threshold: 5000)`,
-        });
-      }
-    }
-
-    const deadLinks = issues.filter((i) => i.type === 'dead_link').length;
-    const orphanPages = issues.filter((i) => i.type === 'orphan_page').length;
-    const totalPages = mdFiles.length;
-
-    // Health score: 100 minus penalty for each issue type
-    const penalty = deadLinks * 10 + orphanPages * 2 + (issues.length - deadLinks - orphanPages);
+    const totalPages = pageInfo.filter((p) => !isSkipped(path.relative(this.kbPath, p.filePath))).length;
+    const errors = issues.filter((i) => i.severity === 'error').length;
+    const warnings = issues.filter((i) => i.severity === 'warning').length;
+    const penalty = errors * 8 + warnings * 2;
     const healthScore = Math.max(0, Math.min(100, 100 - penalty));
-    this.appendLog('lint', `health=${healthScore}, issues=${issues.length}`, `dead_links=${deadLinks}, orphans=${orphanPages}, total=${totalPages}`);
-    return { issues, totalPages, deadLinks, orphanPages, healthScore };
+    this.appendLog('lint', `health=${healthScore}, issues=${issues.length}`, `errors=${errors}, warnings=${warnings}, total=${totalPages}`);
+    return { issues, totalPages, healthScore };
   }
 
   // ---------------------------------------------------------------------------
@@ -900,55 +1236,174 @@ export class WikiEngine {
   }
 
   // ---------------------------------------------------------------------------
-  // Relevance search (V1: keyword matching)
+  // Relevance search (V2: index-based multi-hop)
   // ---------------------------------------------------------------------------
 
-  findRelevantPages(query: string, topK: number): WikiPage[] {
-    const keywords = query
-      .toLowerCase()
-      .split(/\s+/)
-      .filter((w) => w.length > 1 && !STOP_WORDS.has(w));
+  private escapeRegex(str: string): string {
+    return str.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  }
 
-    if (keywords.length === 0) {
-      return [];
-    }
+  /**
+   * Extract keywords from a query string, handling both English and Chinese text.
+   *
+   * Strategy:
+   * - English words: extract as-is (length >= 2, skip stop words)
+   * - Chinese short segments (<=4 chars): keep whole as a keyword
+   * - Chinese long segments (>4 chars):
+   *   1. Generate bigrams, filter out noise (stop-char pairs)
+   *   2. Generate trigrams as higher-precision alternatives
+   *   3. Deduplicate: if a trigram covers a bigram, drop the bigram
+   *      (e.g. "抗干扰" covers "抗干" at the same position → drop "抗干")
+   */
+  private extractKeywords(query: string): string[] {
+    const keywords: string[] = [];
+    const lower = query.toLowerCase();
 
-    const wikiDir = path.join(this.kbPath, 'wiki');
-    if (!fs.existsSync(wikiDir)) {
-      return [];
-    }
+    // Extract English/numeric words
+    const englishWords = lower.match(/[a-z0-9]{2,}/g) || [];
+    keywords.push(...englishWords.filter((w) => !STOP_WORDS.has(w)));
 
-    const mdFiles = this.readdirRecursive(wikiDir, '.md');
-    const scored: Array<{ page: WikiPage; score: number }> = [];
+    // Extract Chinese character sequences
+    const chineseSegments = query.match(/[一-鿿]+/g) || [];
+    for (const seg of chineseSegments) {
+      if (seg.length <= 4) {
+        keywords.push(seg.toLowerCase());
+        continue;
+      }
 
-    for (const filePath of mdFiles) {
-      const raw = fs.readFileSync(filePath, 'utf-8');
-      const { frontmatter, body } = this.parseFrontmatter(raw);
-      const title = (frontmatter['title'] as string) ?? path.basename(filePath, '.md');
-      const type = (frontmatter['type'] as PageKind) ?? 'concept';
-      const sources = (frontmatter['sources'] as string[]) ?? [];
-      const tags = (frontmatter['tags'] as string[]) ?? [];
+      // Long segment: generate bigrams and trigrams
+      const bigrams: string[] = [];
+      const trigrams: string[] = [];
 
-      const searchable = `${title} ${tags.join(' ')} ${body}`.toLowerCase();
-      const snippet = body.slice(0, 200);
+      for (let i = 0; i < seg.length - 1; i++) {
+        const bigram = seg.slice(i, i + 2).toLowerCase();
+        // Filter: skip if both chars are stop chars, or the bigram is in stop list
+        if (
+          CHINESE_STOP_BIGRAMS.has(bigram) ||
+          (CHINESE_STOP_CHARS.has(bigram[0]) && CHINESE_STOP_CHARS.has(bigram[1]))
+        ) {
+          continue;
+        }
+        bigrams.push(bigram);
+      }
 
-      let score = 0;
-      for (const kw of keywords) {
-        if (searchable.includes(kw)) {
-          score++;
+      for (let i = 0; i <= seg.length - 3; i++) {
+        const trigram = seg.slice(i, i + 3).toLowerCase();
+        // Only keep trigrams that start and end with non-stop chars
+        if (!CHINESE_STOP_CHARS.has(trigram[0]) && !CHINESE_STOP_CHARS.has(trigram[2])) {
+          trigrams.push(trigram);
         }
       }
 
-      if (score > 0) {
-        scored.push({
-          page: { title, type, path: filePath, content: snippet, sources, tags },
-          score,
-        });
+      // Deduplicate: mark bigrams that are covered by a trigram
+      const coveredByTrigram = new Set<number>();
+      for (const tri of trigrams) {
+        const triStart = seg.toLowerCase().indexOf(tri);
+        if (triStart === -1) continue;
+        // This trigram covers bigrams at position triStart and triStart+1
+        for (let offset = 0; offset <= 1; offset++) {
+          coveredByTrigram.add(triStart + offset);
+        }
+      }
+
+      for (let i = 0; i < bigrams.length; i++) {
+        if (!coveredByTrigram.has(i)) {
+          keywords.push(bigrams[i]);
+        }
+      }
+      keywords.push(...trigrams);
+    }
+
+    return keywords;
+  }
+
+  findRelevantPages(query: string, topK: number): WikiPage[] {
+    const weightedKeywords = this.buildWeightedKeywords(query);
+    if (weightedKeywords.length === 0) return [];
+
+    this.ensureSearchIndex();
+    if (!this.indexCache || !this.pageMetaCache) return [];
+
+    // --- Hop 1: Score pages using inverted index (no file I/O) ---
+    const scoreMap = new Map<string, number>();
+
+    for (const kw of weightedKeywords) {
+      const entries = this.indexCache.get(kw.term);
+      if (!entries) continue;
+      const bodyHitCount = new Map<string, number>();
+      for (const entry of entries) {
+        if (entry.field === 'body') {
+          const hits = (bodyHitCount.get(entry.pageKey) ?? 0) + 1;
+          if (hits > 3) continue;
+          bodyHitCount.set(entry.pageKey, hits);
+        }
+        let fieldWeight: number;
+        if (entry.field === 'title') fieldWeight = 2.0;
+        else if (entry.field === 'tag') fieldWeight = 1.0;
+        else fieldWeight = 0.2;
+        const score = fieldWeight * kw.weight;
+        const current = scoreMap.get(entry.pageKey) ?? 0;
+        scoreMap.set(entry.pageKey, current + score);
       }
     }
 
-    scored.sort((a, b) => b.score - a.score);
-    return scored.slice(0, topK).map((s) => s.page);
+    // --- Hop 2: Follow wikilinks from high-score pages (read only top 8 bodies) ---
+    const allTitles = Array.from(this.pageMetaCache.keys());
+    const hop1Pages = Array.from(scoreMap.entries())
+      .filter(([_, score]) => score >= 1)
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 8);
+
+    const visitedLinks = new Set<string>();
+    for (const [pageKey] of hop1Pages) {
+      const meta = this.pageMetaCache.get(pageKey);
+      if (!meta) continue;
+      const raw = fs.readFileSync(meta.path, 'utf-8');
+      const { body } = this.parseFrontmatter(raw);
+      const linkMatches = Array.from(body.matchAll(/\[\[([^\[\]]+)\]\]/g));
+      for (const match of linkMatches) {
+        const linkTarget = match[1].split('|')[0].trim().toLowerCase();
+        if (visitedLinks.has(linkTarget)) continue;
+        visitedLinks.add(linkTarget);
+        let target = this.pageMetaCache.get(linkTarget);
+        if (!target && !scoreMap.has(linkTarget)) {
+          for (const [t] of allTitles) {
+            if (t === pageKey) continue;
+            if (this.fuzzyTitleMatch(linkTarget, allTitles)) {
+              target = this.pageMetaCache.get(t);
+              break;
+            }
+          }
+        }
+        if (target && linkTarget !== pageKey) {
+          const linkerScore = scoreMap.get(pageKey) ?? 0;
+          const inheritedScore = linkerScore * 0.3;
+          const current = scoreMap.get(linkTarget) ?? 0;
+          scoreMap.set(linkTarget, Math.max(current, inheritedScore));
+        }
+      }
+    }
+
+    // --- Build results ---
+    const results: Array<{ page: WikiPage; score: number }> = [];
+    for (const [pageKey, score] of scoreMap.entries()) {
+      const meta = this.pageMetaCache.get(pageKey);
+      if (!meta) continue;
+      results.push({
+        page: {
+          title: meta.title,
+          type: meta.type,
+          path: meta.path,
+          content: '',
+          sources: [],
+          tags: meta.tags,
+        },
+        score,
+      });
+    }
+
+    results.sort((a, b) => b.score - a.score);
+    return results.slice(0, topK).map((r) => r.page);
   }
 
   // ---------------------------------------------------------------------------
@@ -974,6 +1429,7 @@ export class WikiEngine {
     }
 
     // For each page, find references to other titles and inject wikilinks
+    // First pass: exact match; second pass: fuzzy word-overlap match
     for (const filePath of mdFiles) {
       let content = fs.readFileSync(filePath, 'utf-8');
       const { frontmatter, body } = this.parseFrontmatter(content);
@@ -982,9 +1438,9 @@ export class WikiEngine {
       let newBody = body;
       let changed = false;
 
+      // Pass 1: Exact match
       for (const [lowerTitle, pageInfo] of Array.from(titleToPage)) {
         if (pageInfo.title === currentPageTitle) continue;
-        // Skip very short titles (1-2 chars) to avoid false positives
         if (pageInfo.title.length < 3) continue;
 
         const escaped = pageInfo.title.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
@@ -995,11 +1451,44 @@ export class WikiEngine {
         }
       }
 
-      if (changed) {
+      // Pass 2: Fuzzy match for titles not yet linked
+      const linkedTitles = new Set<string>();
+      const linkRegex = /\[\[([^\[\]]+)\]\]/g;
+      for (const match of newBody.matchAll(linkRegex)) {
+        linkedTitles.add(match[1].split('|')[0].trim().toLowerCase());
+      }
+      for (const [lowerTitle, pageInfo] of Array.from(titleToPage)) {
+        if (pageInfo.title === currentPageTitle) continue;
+        if (linkedTitles.has(lowerTitle)) continue;
+        if (pageInfo.title.length < 3) continue;
+        if (this.fuzzyTitleMatch(pageInfo.title, [currentPageTitle])) continue;
+        // Only inject if the fuzzy match appears in the body
+        const titleLower = pageInfo.title.toLowerCase();
+        const words = titleLower.split(/[\s\-_|()]+/).filter((w) => w.length > 2);
+        for (const word of words) {
+          const escaped = word.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+          const regex = new RegExp(`(?<!\\[\\[)${escaped}(?!\\]\\])`, 'i');
+          if (regex.test(newBody)) {
+            newBody = newBody.replace(regex, `[[${pageInfo.title}]]`);
+            changed = true;
+            break;
+          }
+        }
+      }
+
+      // Remove dead wikilinks (targets that no longer exist)
+      const deadRegex = /\[\[([^\[\]]+)\]\]/g;
+      const cleanedBody = newBody.replace(deadRegex, (match, target: string) => {
+        const cleanTarget = target.split('|')[0].trim().toLowerCase();
+        return titleToPage.has(cleanTarget) ? match : cleanTarget;
+      });
+      const bodyChanged = cleanedBody !== newBody || changed;
+
+      if (bodyChanged) {
         // Reconstruct file with original frontmatter + updated body
         const fmEnd = content.indexOf('---', 3);
         const fmBlock = fmEnd !== -1 ? content.slice(0, fmEnd + 3) : '';
-        fs.writeFileSync(filePath, `${fmBlock}\n${newBody}`, 'utf-8');
+        fs.writeFileSync(filePath, `${fmBlock}\n${cleanedBody}`, 'utf-8');
       }
     }
   }
@@ -1007,6 +1496,7 @@ export class WikiEngine {
   updateIndex(): void {
     const wikiDir = path.join(this.kbPath, 'wiki');
     fs.mkdirSync(wikiDir, { recursive: true });
+    this.clearReportCache();
 
     const categories: Record<PageKind, Array<{ title: string; desc: string }>> = {
       concept: [],
@@ -1027,7 +1517,7 @@ export class WikiEngine {
         const { frontmatter, body } = this.parseFrontmatter(raw);
         const title = (frontmatter['title'] as string) ?? path.basename(file, '.md');
         const firstLine = body.split('\n').find((l) => l.trim().length > 0) ?? '';
-        const desc = firstLine.replace(/^#+\s*/, '').slice(0, 100);
+        const desc = firstLine.replace(/\[\[[^\]]*\]\]/g, '').replace(/^#+\s*/, '').trim().slice(0, 100);
 
         if (categories[kind]) {
           categories[kind].push({ title, desc });
@@ -1055,6 +1545,62 @@ export class WikiEngine {
     }
 
     fs.writeFileSync(path.join(wikiDir, 'index.md'), sections.join('\n'), 'utf-8');
+  }
+
+  /**
+   * Incremental index update: only append newly created pages to existing index.md,
+   * avoiding a full rebuild. Duplicates are skipped.
+   */
+  appendIndex(newPages: Array<{ title: string; kind: PageKind; desc: string }>): void {
+    const wikiDir = path.join(this.kbPath, 'wiki');
+    fs.mkdirSync(wikiDir, { recursive: true });
+    this.clearReportCache();
+    const indexPath = path.join(wikiDir, 'index.md');
+
+    // Read existing index to check which titles are already listed
+    const existingTitles = new Set<string>();
+    if (fs.existsSync(indexPath)) {
+      const content = fs.readFileSync(indexPath, 'utf-8');
+      for (const match of content.matchAll(/\[\[([^\[\]]+)\]\]/g)) {
+        existingTitles.add(match[1].split('|')[0].trim().toLowerCase());
+      }
+    }
+
+    // Group new pages by kind
+    const byKind = new Map<PageKind, Array<{ title: string; desc: string }>>();
+    for (const p of newPages) {
+      if (existingTitles.has(p.title.toLowerCase())) continue;
+      if (!byKind.has(p.kind)) byKind.set(p.kind, []);
+      byKind.get(p.kind)!.push({ title: p.title, desc: p.desc });
+    }
+
+    if (byKind.size === 0) return;
+
+    const typeLabels: Record<PageKind, string> = {
+      concept: 'Concepts',
+      entity: 'Entities',
+      summary: 'Summaries',
+      conversation: 'Conversations',
+    };
+
+    // If index doesn't exist, create it from scratch
+    if (!fs.existsSync(indexPath)) {
+      this.updateIndex();
+      return;
+    }
+
+    // Append new sections to existing index
+    const additions: string[] = [];
+    for (const [kind, entries] of Array.from(byKind)) {
+      additions.push(`## ${typeLabels[kind]}`, '');
+      for (const entry of entries) {
+        additions.push(`- [[${entry.title}]] — ${entry.desc}`);
+      }
+      additions.push('');
+    }
+
+    const existing = fs.readFileSync(indexPath, 'utf-8');
+    fs.writeFileSync(indexPath, existing + '\n' + additions.join('\n'), 'utf-8');
   }
 
   // ---------------------------------------------------------------------------
@@ -1341,6 +1887,51 @@ export class WikiEngine {
   private extractCitations(text: string): string[] {
     const matches = text.matchAll(/\[\[([^\]]+)\]\]/g);
     return Array.from(matches, (m) => m[1]);
+  }
+
+  /**
+   * Check if a wikilink target roughly matches any existing page title.
+   * Uses word-overlap ratio: shared words / total unique words.
+   */
+  private fuzzyTitleMatch(target: string, allTitles: string[]): boolean {
+    const targetLower = target.toLowerCase();
+    const targetWords = new Set(targetLower.split(/[\s\-_|()]+/).filter((w) => w.length > 1));
+    if (targetWords.size === 0) return false;
+    for (const title of allTitles) {
+      const titleLower = title.toLowerCase();
+      if (targetLower === titleLower) continue;
+      const titleWords = new Set(titleLower.split(/[\s\-_|()]+/).filter((w) => w.length > 1));
+      let overlap = 0;
+      for (const w of targetWords) {
+        if (titleWords.has(w)) overlap++;
+      }
+      const union = targetWords.size + titleWords.size - overlap;
+      if (union === 0) continue;
+      if (overlap / union >= 0.6) return true;
+    }
+    return false;
+  }
+
+  /**
+   * Jaccard similarity between two titles based on character bigrams.
+   */
+  private titleSimilarity(a: string, b: string): number {
+    const bigrams = (s: string) => {
+      const set = new Set<string>();
+      const lower = s.toLowerCase();
+      for (let i = 0; i < lower.length - 1; i++) {
+        set.add(lower.slice(i, i + 2));
+      }
+      return set;
+    };
+    const sa = bigrams(a);
+    const sb = bigrams(b);
+    if (sa.size === 0 && sb.size === 0) return 0;
+    let intersection = 0;
+    for (const bg of sa) {
+      if (sb.has(bg)) intersection++;
+    }
+    return intersection / (sa.size + sb.size - intersection);
   }
 
   /**

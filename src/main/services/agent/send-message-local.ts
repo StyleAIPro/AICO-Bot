@@ -356,15 +356,16 @@ export async function sendMessage(
     // These are specific to sendMessage and not part of base options
     const kbContextParts: string[] = [];
     if (request.activeKnowledgeBases && request.activeKnowledgeBases.length > 0) {
+      console.log('[Agent] KB context for:', request.activeKnowledgeBases);
       try {
         const { getKnowledgeBaseService } = await import('../knowledge-base');
         const kbService = getKnowledgeBaseService();
         for (const kbId of request.activeKnowledgeBases) {
+          const kbInfo = kbService.getKnowledgeBase(kbId);
+          const kbName = kbInfo?.name || kbId;
           const context = await kbService.retrieveForChat(kbId, message);
           if (context) {
-            const kbInfo = kbService.getKnowledgeBase(kbId);
-            const kbName = kbInfo?.name || kbId;
-            kbContextParts.push(`### ${kbName}\n${context}`);
+            kbContextParts.push(`--- 知识库开始 ---\n知识库名称: ${kbName}\n--- 知识库内容 ---\n${context}\n--- 知识库结束 ---`);
           }
         }
       } catch (err) {
@@ -374,7 +375,7 @@ export async function sendMessage(
 
     let systemPromptAppend = '';
     if (kbContextParts.length > 0) {
-      systemPromptAppend += `[Knowledge Base Context]\nThe following knowledge base content is relevant to the user's question. Use it to provide accurate answers. If the answer cannot be found in the knowledge base, say so clearly.\n\n${kbContextParts.join('\n\n---\n\n')}\n\n[End Knowledge Base Context]\n\n`;
+      systemPromptAppend += `[Knowledge Base Context]\nThe following is retrieved from the user's local knowledge base. Use it as the PRIMARY reference for relevant topics. You MUST supplement with your own knowledge ONLY where the knowledge base lacks coverage. Do NOT contradict specific facts stated in the knowledge base.\n\nCITATION RULES (MUST follow exactly):\n1. In paragraphs where you use knowledge base information, insert numbered markers like [1], [2] at the relevant point.\n2. At the VERY END of your response, place ALL references under "参考知识库文档：" header. Each reference on its OWN LINE with a blank line between each item (double newline).\n3. Each reference format: [编号]知识库{知识库名称}-wiki页面标题\n   - "知识库名称": copy EXACTLY from the "知识库名称: xxx" line in the context below. Do NOT make up or change the name.\n   - "wiki页面标题": copy from the "## xxx" header of the referenced page.\n4. Do NOT use any other citation format. Do NOT fabricate knowledge base names.\n\nEXAMPLE (note the blank lines between references):\n波束赋形可在干扰源方向形成零陷[1]，将干扰抑制20-40dB。\n\n参考知识库文档：\n\n[1]知识库{1}-波束赋形基础\n\n[2]知识库{9}-GPS抗干扰技术\n\n${kbContextParts.join('\n\n')}\n\n[End Knowledge Base Context]\n\n`;
     }
 
     if (aiBrowserEnabled) {

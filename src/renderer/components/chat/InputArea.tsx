@@ -115,6 +115,11 @@ function InputAreaInternal(
   const [content, setContent] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false); // Extended thinking mode
+
+  // Clear input when switching conversations
+  useEffect(() => {
+    setContent('');
+  }, [conversationId]);
   const [showAttachMenu, setShowAttachMenu] = useState(false); // Attachment menu visibility
   const [showKbMenu, setShowKbMenu] = useState(false); // Knowledge base menu visibility
   const [isCompacting, setIsCompacting] = useState(false); // Context compression in progress
@@ -937,10 +942,10 @@ function InputToolbar({
                       : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/50'
                 }
               `}
-              title="知识库"
+              title="本地知识库"
             >
               <BookOpen size={15} />
-              <span className="text-xs">知识库</span>
+              <span className="text-xs">本地知识库</span>
               {activeCount > 0 && (
                 <span className="ml-0.5 min-w-[16px] h-4 flex items-center justify-center px-1 rounded-full bg-emerald-500 text-white text-[10px] leading-none">
                   {activeCount}

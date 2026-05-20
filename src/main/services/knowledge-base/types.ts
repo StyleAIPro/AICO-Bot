@@ -56,6 +56,7 @@ export interface IngestResult {
   entitiesCount: number;
   summaryCreated: boolean;
   errors: string[];
+  newPages: Array<{ title: string; kind: string; desc: string }>;
 }
 
 export interface CompileResult {
@@ -71,25 +72,25 @@ export interface QueryResult {
 }
 
 export type LintIssueType =
-  | 'dead_link'
-  | 'orphan_page'
-  | 'missing_index'
   | 'oversized_page'
   | 'undersized_page'
-  | 'malformed_frontmatter';
+  | 'missing_frontmatter'
+  | 'empty_tags'
+  | 'empty_body'
+  | 'duplicate_title'
+  | 'missing_source';
 
 export interface LintIssue {
   type: LintIssueType;
   severity: 'warning' | 'error';
   file: string;
   detail: string;
+  relatedFile?: string;
 }
 
 export interface LintResult {
   issues: LintIssue[];
   totalPages: number;
-  deadLinks: number;
-  orphanPages: number;
   healthScore: number;
 }
 

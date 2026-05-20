@@ -25,12 +25,15 @@ import {
   KB_LIST_CONVERSATIONS,
   KB_INGEST,
   KB_INGEST_ALL,
+  KB_INGEST_INCREMENTAL,
   KB_INGEST_CANCEL,
   KB_RECOMPILE,
   KB_COMPILE,
   KB_QUERY,
   KB_SAVE_QUERY,
   KB_LINT,
+  KB_GENERATE_REPORT,
+  KB_LOAD_REPORT,
   KB_AUDIT,
   KB_LIST_PAGES,
   KB_READ_PAGE,
@@ -221,7 +224,7 @@ export function registerKnowledgeBaseHandlers(): void {
 
       const total: IngestResult = {
         pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0,
-        summaryCreated: false, errors: [],
+        summaryCreated: false, errors: [], newPages: [],
       };
 
       for (let i = 0; i < toIngest.length; i++) {
@@ -269,6 +272,72 @@ export function registerKnowledgeBaseHandlers(): void {
     }
   });
 
+  wrapIpcHandle(KB_INGEST_INCREMENTAL, async (_event, kbId: string) => {
+    const controller = new AbortController();
+    activeControllers.set(kbId, controller);
+    const signal = controller.signal;
+
+    try {
+      const svc = getKnowledgeBaseService();
+      const sources = svc.listSources(kbId);
+      const toIngest = sources.filter((s) => s.status === 'pending');
+
+      if (toIngest.length === 0) {
+        return { success: false, error: 'NO_NEW_FILES', data: null };
+      }
+
+      const total: IngestResult & { errors: string[] } = {
+        pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0,
+        summaryCreated: false, errors: [], newPages: [],
+      };
+
+      for (let i = 0; i < toIngest.length; i++) {
+        if (signal.aborted) break;
+        const source = toIngest[i];
+        sendProgress({ current: i + 1, total: toIngest.length, fileName: source.storedName, sourceId: source.id });
+        try {
+          const result = await svc.ingest(kbId, source.id, signal, true);
+          total.pagesCreated += result.pagesCreated;
+          total.pagesUpdated += result.pagesUpdated;
+          total.conceptsCount += result.conceptsCount;
+          total.entitiesCount += result.entitiesCount;
+          if (result.summaryCreated) total.summaryCreated = true;
+          total.newPages.push(...result.newPages);
+          sendProgress({ current: i + 1, total: toIngest.length, fileName: source.storedName, completedSourceId: source.id });
+        } catch (err: unknown) {
+          const message = err instanceof Error ? err.message : String(err);
+          if (message === '提取已取消') {
+            total.errors.push(`${source.storedName}提取失败，用户取消提取`);
+            break;
+          }
+          total.errors.push(`${source.storedName}: ${message}`);
+        }
+        if (global.gc) global.gc();
+      }
+
+      sendProgress({ current: 0, total: 0, fileName: '' });
+
+      if (!signal.aborted) {
+        // Append new pages to existing index instead of rebuilding
+        if (total.newPages.length > 0) {
+          const { WikiEngine } = await import('../services/knowledge-base/wiki-engine');
+          const kbPath = svc.getKbPath(kbId);
+          const engine = new WikiEngine(kbPath, null as unknown as import('../services/knowledge-base/llm-caller').KbLlmCaller);
+          engine.appendIndex(total.newPages as Array<{ title: string; kind: 'concept' | 'entity' | 'summary' | 'conversation'; desc: string }>);
+          engine.crossLinkAllPages();
+        }
+        svc.recountPages(kbId);
+      }
+
+      return { success: true, data: total };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    } finally {
+      activeControllers.delete(kbId);
+    }
+  });
+
   wrapIpcHandle(KB_INGEST_CANCEL, async (_event, kbId: string) => {
     const controller = activeControllers.get(kbId);
     if (controller) {
@@ -290,7 +359,7 @@ export function registerKnowledgeBaseHandlers(): void {
       const sources = svc.listSources(kbId);
       const total: IngestResult = {
         pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0,
-        summaryCreated: false, errors: [],
+        summaryCreated: false, errors: [], newPages: [],
       };
 
       for (let i = 0; i < sources.length; i++) {
@@ -377,6 +446,28 @@ export function registerKnowledgeBaseHandlers(): void {
       const svc = getKnowledgeBaseService();
       const data = await svc.lint(kbId);
       return { success: true, data };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
+
+  wrapIpcHandle(KB_GENERATE_REPORT, async (_event, kbId: string) => {
+    try {
+      const svc = getKnowledgeBaseService();
+      const data = await svc.generateReport(kbId);
+      return { success: true, data };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
+
+  wrapIpcHandle(KB_LOAD_REPORT, async (_event, kbId: string) => {
+    try {
+      const svc = getKnowledgeBaseService();
+      const data = await svc.loadReport(kbId);
+      return { success: true, data: data ?? null };
     } catch (error: unknown) {
       const err = error as Error;
       return { success: false, error: err.message };

@@ -22,12 +22,15 @@ export const KB_LIST_CONVERSATIONS = 'knowledge-base:list-conversations';
 // Wiki operations
 export const KB_INGEST = 'knowledge-base:ingest';
 export const KB_INGEST_ALL = 'knowledge-base:ingest-all';
+export const KB_INGEST_INCREMENTAL = 'knowledge-base:ingest-incremental';
 export const KB_INGEST_CANCEL = 'knowledge-base:ingest-cancel';
 export const KB_RECOMPILE = 'knowledge-base:recompile';
 export const KB_COMPILE = 'knowledge-base:compile';
 export const KB_QUERY = 'knowledge-base:query';
 export const KB_SAVE_QUERY = 'knowledge-base:save-query';
 export const KB_LINT = 'knowledge-base:lint';
+export const KB_GENERATE_REPORT = 'knowledge-base:generate-report';
+export const KB_LOAD_REPORT = 'knowledge-base:load-report';
 export const KB_AUDIT = 'knowledge-base:audit';
 
 // Chat integration

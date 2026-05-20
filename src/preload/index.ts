@@ -174,11 +174,14 @@ export interface AicoBotAPI {
   kbListConversations: (kbId: string) => Promise<IpcResponse>;
   kbIngest: (kbId: string, sourceId: string) => Promise<IpcResponse>;
   kbIngestAll: (kbId: string) => Promise<IpcResponse>;
+  kbIngestIncremental: (kbId: string) => Promise<IpcResponse>;
   kbCancelIngest: (kbId: string) => Promise<IpcResponse>;
   kbRecompile: (kbId: string) => Promise<IpcResponse>;
   kbCompile: (kbId: string) => Promise<IpcResponse>;
   kbQuery: (kbId: string, question: string) => Promise<IpcResponse>;
   kbLint: (kbId: string) => Promise<IpcResponse>;
+  kbGenerateReport: (kbId: string) => Promise<IpcResponse>;
+  kbLoadReport: (kbId: string) => Promise<IpcResponse>;
   kbAudit: (kbId: string, correction: unknown) => Promise<IpcResponse>;
   kbListPages: (kbId: string) => Promise<IpcResponse>;
   kbReadPage: (kbId: string, pagePath: string) => Promise<IpcResponse>;
@@ -901,6 +904,8 @@ const api: AicoBotAPI = {
     ipcRenderer.invoke('knowledge-base:ingest', kbId, sourceId),
   kbIngestAll: (kbId: string) =>
     ipcRenderer.invoke('knowledge-base:ingest-all', kbId),
+  kbIngestIncremental: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:ingest-incremental', kbId),
   kbCancelIngest: (kbId: string) =>
     ipcRenderer.invoke('knowledge-base:ingest-cancel', kbId),
   kbRecompile: (kbId: string) =>
@@ -911,6 +916,10 @@ const api: AicoBotAPI = {
     ipcRenderer.invoke('knowledge-base:query', kbId, question),
   kbLint: (kbId: string) =>
     ipcRenderer.invoke('knowledge-base:lint', kbId),
+  kbGenerateReport: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:generate-report', kbId),
+  kbLoadReport: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:load-report', kbId),
   kbAudit: (kbId: string, correction: unknown) =>
     ipcRenderer.invoke('knowledge-base:audit', kbId, correction),
   kbListPages: (kbId: string) =>

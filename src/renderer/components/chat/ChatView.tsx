@@ -79,6 +79,11 @@ export function ChatView({ isCompact = false }: ChatViewProps) {
     }
   }, [isOnboarding]);
 
+  // Load knowledge bases on mount so KB context is available in chat
+  useEffect(() => {
+    useKnowledgeBaseStore.getState().loadKnowledgeBases();
+  }, []);
+
   // MessageList ref for scroll control (Virtuoso-based)
   const messageListRef = useRef<MessageListHandle>(null);
 

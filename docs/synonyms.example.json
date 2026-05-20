@@ -1,0 +1,22 @@
+[
+  ["波束赋形", "波束成形", "beamforming", "beam forming"],
+  ["恒模约束", "constant-modulus constraint", "CM约束", "CM Constraint", "恒模"],
+  ["半定松弛", "SDR", "semi-definite relaxation", "半定规划"],
+  ["全双工", "full-duplex", "同时收发"],
+  ["环路干扰", "LI", "loop interference", "自干扰"],
+  ["大规模MIMO", "massive MIMO", "Massive MIMO"],
+  ["混合波束赋形", "hybrid beamforming", "hybrid beam forming", "数模混合波束赋形"],
+  ["模拟波束赋形", "analog beamforming", "Analog Beamforming"],
+  ["数字波束赋形", "digital beamforming", "Digital Beamforming"],
+  ["部分连接", "partially-connected", "Partially Connected"],
+  ["全连接", "fully-connected", "Fully Connected"],
+  ["正交频分复用", "OFDM", "orthogonal frequency division multiplexing"],
+  ["信道估计", "channel estimation", "Channel Estimation"],
+  ["信噪比", "SNR", "signal-to-noise ratio"],
+  ["零陷", "null steering", "nulling", "零点约束"],
+  ["凸优化", "convex optimization", "Convex Optimization"],
+  ["次优", "suboptimal", "Suboptimal"],
+  ["吞吐量", "throughput", "Throughput"],
+  ["频谱效率", "spectral efficiency", "Spectral Efficiency"],
+  ["信干噪比", "SINR", "signal-to-interference-plus-noise ratio"]
+]

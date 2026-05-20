@@ -1,0 +1,791 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>AICO-Bot 知识库检索系统</title>
+<style>
+  @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&family=Noto+Sans+SC:wght@300;400;500;700&display=swap');
+
+  :root {
+    --bg: #0f1117;
+    --bg-card: #1a1d27;
+    --bg-code: #252830;
+    --text: #e4e4e7;
+    --text-muted: #9ca3af;
+    --accent: #6366f1;
+    --accent-light: #818cf8;
+    --green: #34d399;
+    --green-dim: rgba(52,211,153,0.12);
+    --orange: #fb923c;
+    --orange-dim: rgba(251,146,60,0.12);
+    --blue: #60a5fa;
+    --blue-dim: rgba(96,165,250,0.12);
+    --pink: #f472b6;
+    --pink-dim: rgba(244,114,182,0.12);
+    --border: rgba(255,255,255,0.06);
+    --radius: 12px;
+  }
+
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+
+  body {
+    font-family: 'Noto Sans SC', 'Inter', sans-serif;
+    background: var(--bg);
+    color: var(--text);
+    min-height: 100vh;
+    overflow: hidden;
+  }
+
+  .slide {
+    display: none;
+    width: 100vw;
+    height: 100vh;
+    padding: 60px 80px;
+    flex-direction: column;
+    position: relative;
+  }
+  .slide.active { display: flex; }
+
+  .slide-number {
+    position: absolute;
+    top: 32px;
+    right: 80px;
+    font-size: 13px;
+    color: var(--text-muted);
+    font-family: 'Inter', monospace;
+  }
+
+  h1 { font-size: 40px; font-weight: 700; line-height: 1.3; margin-bottom: 12px; }
+  h2 { font-size: 28px; font-weight: 600; line-height: 1.4; margin-bottom: 20px; }
+  h3 { font-size: 18px; font-weight: 600; margin-bottom: 8px; }
+
+  .subtitle { font-size: 18px; color: var(--text-muted); margin-bottom: 40px; }
+
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; flex: 1; }
+  .grid-3 { display: grid; grid-template-columns: 1fr 1fr 1fr; gap: 20px; }
+  .grid-4 { display: grid; grid-template-columns: 1fr 1fr 1fr 1fr; gap: 16px; }
+
+  .card {
+    background: var(--bg-card);
+    border: 1px solid var(--border);
+    border-radius: var(--radius);
+    padding: 24px;
+  }
+
+  .card-accent-green { border-left: 3px solid var(--green); }
+  .card-accent-orange { border-left: 3px solid var(--orange); }
+  .card-accent-blue { border-left: 3px solid var(--blue); }
+  .card-accent-pink { border-left: 3px solid var(--pink); }
+
+  .badge {
+    display: inline-block;
+    font-size: 11px;
+    font-weight: 600;
+    padding: 3px 10px;
+    border-radius: 20px;
+    margin-bottom: 10px;
+    letter-spacing: 0.5px;
+  }
+  .badge-green { background: var(--green-dim); color: var(--green); }
+  .badge-orange { background: var(--orange-dim); color: var(--orange); }
+  .badge-blue { background: var(--blue-dim); color: var(--blue); }
+  .badge-pink { background: var(--pink-dim); color: var(--pink); }
+
+  .desc { font-size: 14px; color: var(--text-muted); line-height: 1.7; }
+
+  .flow-row {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin-bottom: 16px;
+    flex-wrap: wrap;
+  }
+
+  .flow-box {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 10px 18px;
+    font-size: 13px;
+    font-weight: 500;
+    white-space: nowrap;
+  }
+  .flow-box.highlight { border-color: var(--accent); color: var(--accent-light); }
+
+  .flow-arrow { color: var(--text-muted); font-size: 18px; }
+
+  .tag {
+    display: inline-block;
+    font-size: 12px;
+    padding: 2px 8px;
+    border-radius: 4px;
+    background: var(--bg-code);
+    color: var(--text-muted);
+    margin: 2px 4px 2px 0;
+  }
+
+  .metric {
+    font-size: 36px;
+    font-weight: 700;
+    font-family: 'Inter', monospace;
+  }
+  .metric-label { font-size: 13px; color: var(--text-muted); margin-top: 4px; }
+
+  code {
+    font-family: 'JetBrains Mono', 'Fira Code', monospace;
+    font-size: 13px;
+    background: var(--bg-code);
+    padding: 2px 6px;
+    border-radius: 4px;
+    color: var(--accent-light);
+  }
+
+  .code-block {
+    background: var(--bg-code);
+    border: 1px solid var(--border);
+    border-radius: 8px;
+    padding: 16px 20px;
+    font-family: 'JetBrains Mono', monospace;
+    font-size: 12.5px;
+    line-height: 1.7;
+    overflow-x: auto;
+    color: var(--text-muted);
+  }
+  .code-block .kw { color: var(--pink); }
+  .code-block .str { color: var(--green); }
+  .code-block .num { color: var(--orange); }
+  .code-block .cmt { color: #555; font-style: italic; }
+
+  .highlight-box {
+    background: linear-gradient(135deg, rgba(99,102,241,0.08), rgba(99,102,241,0.02));
+    border: 1px solid rgba(99,102,241,0.2);
+    border-radius: var(--radius);
+    padding: 24px 28px;
+    margin-top: 16px;
+  }
+
+  .diagram {
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 0;
+    flex: 1;
+    flex-wrap: wrap;
+    padding: 20px 0;
+  }
+
+  .diagram-box {
+    text-align: center;
+    border-radius: 10px;
+    padding: 18px 24px;
+    min-width: 140px;
+    border: 1px solid var(--border);
+  }
+  .diagram-box .icon { font-size: 28px; margin-bottom: 8px; }
+  .diagram-box .label { font-size: 13px; font-weight: 500; }
+  .diagram-box .sub { font-size: 11px; color: var(--text-muted); margin-top: 4px; }
+
+  .diagram-arrow {
+    font-size: 22px;
+    color: var(--text-muted);
+    margin: 0 8px;
+    flex-shrink: 0;
+  }
+
+  .table-wrap {
+    overflow: auto;
+    flex: 1;
+  }
+  table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 14px;
+  }
+  th {
+    text-align: left;
+    padding: 10px 16px;
+    background: var(--bg-code);
+    color: var(--text-muted);
+    font-weight: 500;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 1px solid var(--border);
+  }
+  td {
+    padding: 10px 16px;
+    border-bottom: 1px solid var(--border);
+    color: var(--text);
+  }
+  tr:last-child td { border-bottom: none; }
+
+  /* Navigation */
+  .nav {
+    position: fixed;
+    bottom: 28px;
+    left: 50%;
+    transform: translateX(-50%);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    z-index: 100;
+  }
+  .nav-btn {
+    width: 40px;
+    height: 40px;
+    border-radius: 50%;
+    border: 1px solid var(--border);
+    background: var(--bg-card);
+    color: var(--text);
+    font-size: 16px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+  }
+  .nav-btn:hover { background: var(--accent); border-color: var(--accent); }
+  .nav-dots {
+    display: flex;
+    gap: 6px;
+  }
+  .nav-dot {
+    width: 8px;
+    height: 8px;
+    border-radius: 50%;
+    background: var(--border);
+    cursor: pointer;
+    transition: all 0.2s;
+  }
+  .nav-dot.active { background: var(--accent); width: 24px; border-radius: 4px; }
+
+  .tag-row { margin-top: 8px; }
+
+  /* Title slide */
+  .title-slide {
+    justify-content: center;
+    align-items: center;
+    text-align: center;
+  }
+  .title-slide h1 { font-size: 52px; margin-bottom: 16px; }
+  .title-slide .subtitle { font-size: 20px; margin-bottom: 32px; }
+  .title-meta { font-size: 14px; color: var(--text-muted); }
+
+  .divider {
+    width: 60px;
+    height: 3px;
+    background: var(--accent);
+    border-radius: 2px;
+    margin: 0 auto 24px;
+  }
+
+  .feature-list {
+    list-style: none;
+    padding: 0;
+  }
+  .feature-list li {
+    padding: 8px 0;
+    font-size: 14px;
+    color: var(--text-muted);
+    display: flex;
+    align-items: flex-start;
+    gap: 10px;
+    line-height: 1.6;
+  }
+  .feature-list li::before {
+    content: '';
+    width: 6px;
+    height: 6px;
+    background: var(--accent);
+    border-radius: 50%;
+    margin-top: 8px;
+    flex-shrink: 0;
+  }
+
+  .weight-bar {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    margin: 10px 0;
+  }
+  .weight-bar .label { font-size: 13px; width: 60px; text-align: right; color: var(--text-muted); }
+  .weight-bar .bar {
+    flex: 1;
+    height: 8px;
+    border-radius: 4px;
+    background: var(--bg-code);
+    overflow: hidden;
+  }
+  .weight-bar .bar-fill { height: 100%; border-radius: 4px; }
+  .weight-bar .val { font-size: 12px; font-family: 'Inter', monospace; color: var(--text-muted); width: 40px; }
+</style>
+</head>
+<body>
+
+<!-- ==================== Slide 1: Title ==================== -->
+<div class="slide title-slide active" id="s1">
+  <div class="divider"></div>
+  <h1>AICO-Bot 知识库检索系统</h1>
+  <p class="subtitle">架构设计与检索算法详解</p>
+  <p class="title-meta">AICO-Bot &middot; 个人知识库模块 &middot; 技术汇报</p>
+</div>
+
+<!-- ==================== Slide 2: Overview ==================== -->
+<div class="slide" id="s2">
+  <span class="slide-number">02 / 10</span>
+  <h1>系统定位</h1>
+  <p class="subtitle">将本地文档转化为 AI 可检索的结构化知识</p>
+  <div class="grid-3" style="flex:1; align-content:center;">
+    <div class="card card-accent-green">
+      <span class="badge badge-green">核心能力</span>
+      <h3>文档摄取</h3>
+      <p class="desc">支持 PDF、Markdown、代码等 20+ 格式，AI 自动分析并生成结构化 Wiki 页面</p>
+    </div>
+    <div class="card card-accent-blue">
+      <span class="badge badge-blue">检索引擎</span>
+      <h3>两跳关键词检索</h3>
+      <p class="desc">倒排索引 + Wikilink 关联扩展，无向量依赖，毫秒级响应</p>
+    </div>
+    <div class="card card-accent-pink">
+      <span class="badge badge-pink">上下文注入</span>
+      <h3>AI 对话集成</h3>
+      <p class="desc">自动检索相关页面注入 System Prompt，带引用溯源和跳转能力</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 3: Architecture ==================== -->
+<div class="slide" id="s3">
+  <span class="slide-number">03 / 10</span>
+  <h1>整体架构</h1>
+  <p class="subtitle">Electron 多进程架构中的知识库位置</p>
+  <div class="diagram">
+    <div class="diagram-box" style="background:rgba(244,114,182,0.06); border-color:rgba(244,114,182,0.2);">
+      <div class="icon">&#x1f4ac;</div>
+      <div class="label">用户消息</div>
+      <div class="sub">activeKBIds</div>
+    </div>
+    <div class="diagram-arrow">&rarr;</div>
+    <div class="diagram-box" style="background:rgba(99,102,241,0.06); border-color:rgba(99,102,241,0.2);">
+      <div class="icon">&#x1f9e9;</div>
+      <div class="label">Chat Store</div>
+      <div class="sub">activeKBIds</div>
+    </div>
+    <div class="diagram-arrow">&rarr;</div>
+    <div class="diagram-box" style="background:rgba(52,211,153,0.06); border-color:rgba(52,211,153,0.2);">
+      <div class="icon">&#x1f50d;</div>
+      <div class="label">KB Service</div>
+      <div class="sub">retrieveForChat</div>
+    </div>
+    <div class="diagram-arrow">&rarr;</div>
+    <div class="diagram-box" style="background:rgba(251,146,60,0.06); border-color:rgba(251,146,60,0.2);">
+      <div class="icon">&#x1f4d6;</div>
+      <div class="label">WikiEngine</div>
+      <div class="sub">findRelevantPages</div>
+    </div>
+    <div class="diagram-arrow">&rarr;</div>
+    <div class="diagram-box" style="background:rgba(96,165,250,0.06); border-color:rgba(96,165,250,0.2);">
+      <div class="icon">&#x1f916;</div>
+      <div class="label">Claude SDK</div>
+      <div class="sub">systemPrompt</div>
+    </div>
+  </div>
+  <div class="grid-4" style="margin-top:32px;">
+    <div style="text-align:center;">
+      <div class="metric" style="color:var(--pink);">Renderer</div>
+      <div class="metric-label">React 前端</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="metric" style="color:var(--accent-light);">IPC</div>
+      <div class="metric-label">进程间通信</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="metric" style="color:var(--green);">Main</div>
+      <div class="metric-label">Node.js 主进程</div>
+    </div>
+    <div style="text-align:center;">
+      <div class="metric" style="color:var(--blue);">Claude</div>
+      <div class="metric-label">AI Agent</div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 4: KB Selection ==================== -->
+<div class="slide" id="s4">
+  <span class="slide-number">04 / 10</span>
+  <h1>知识库选择机制</h1>
+  <p class="subtitle">每个会话独立维护知识库开关状态</p>
+  <div class="grid-2" style="flex:1;">
+    <div>
+      <div class="card card-accent-green" style="margin-bottom:16px;">
+        <span class="badge badge-green">Per-Conversation</span>
+        <h3>会话级 KB 选择</h3>
+        <p class="desc" style="margin-top:8px;">每个对话拥有独立的知识库选择状态，通过 <code>_conversationKbMap</code> 持久化映射。</p>
+      </div>
+      <div class="code-block">
+<span class="cmt">// Store 核心数据结构</span>
+_conversationKbMap: <span class="kw">Map</span>&lt;conversationId, kbId[]&gt;
+_currentConversationId: <span class="kw">string | null</span>
+activeKnowledgeBaseIds: <span class="kw">string[]</span>
+      </div>
+    </div>
+    <div>
+      <h3 style="margin-bottom:16px;">生命周期</h3>
+      <div class="card" style="margin-bottom:10px;">
+        <span class="badge badge-green">创建会话</span>
+        <p class="desc">自动选中所有 <code>isEnabled</code> 的知识库</p>
+      </div>
+      <div class="card" style="margin-bottom:10px;">
+        <span class="badge badge-blue">切换会话</span>
+        <p class="desc">恢复该会话的 KB 选择状态，无记录则默认全选</p>
+      </div>
+      <div class="card" style="margin-bottom:10px;">
+        <span class="badge badge-orange">用户调整</span>
+        <p class="desc"><code>toggleActiveKb(kbId)</code> 实时开关，状态持久化到 Map</p>
+      </div>
+      <div class="card">
+        <span class="badge badge-pink">发送消息</span>
+        <p class="desc">读取 <code>activeKnowledgeBaseIds</code> 传给主进程</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 5: Retrieval Flow ==================== -->
+<div class="slide" id="s5">
+  <span class="slide-number">05 / 10</span>
+  <h1>检索流程</h1>
+  <p class="subtitle">从用户消息到上下文注入的完整路径</p>
+  <div style="flex:1; display:flex; flex-direction:column; justify-content:center;">
+    <div class="flow-row">
+      <div class="flow-box highlight">用户消息</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">extractKeywords()</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">倒排索引查询</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Hop1 评分</div>
+    </div>
+    <div class="flow-row" style="margin-left:320px;">
+      <div class="flow-arrow">&darr;</div>
+    </div>
+    <div class="flow-row" style="margin-left:320px;">
+      <div class="flow-box">Wikilink 扩展</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Hop2 关联加分</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">Top 7 页面</div>
+      <div class="flow-arrow">&rarr;</div>
+      <div class="flow-box">读取全文</div>
+    </div>
+    <div class="flow-row" style="margin-left:520px;">
+      <div class="flow-arrow">&darr;</div>
+    </div>
+    <div class="flow-row" style="margin-left:520px;">
+      <div class="flow-box highlight">注入 System Prompt</div>
+    </div>
+    <div class="highlight-box" style="margin-top:32px;">
+      <p class="desc"><strong style="color:var(--text);">关键特性：</strong>纯关键词检索，无向量嵌入依赖 &middot; 倒排索引内存缓存，毫秒级响应 &middot; 两跳 Wikilink 扩展实现关联发现 &middot; 多 KB 独立检索后拼接上下文</p>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 6: Tokenization ==================== -->
+<div class="slide" id="s6">
+  <span class="slide-number">06 / 10</span>
+  <h1>中英文混合分词</h1>
+  <p class="subtitle">extractKeywords() 分词策略</p>
+  <div class="grid-2" style="flex:1;">
+    <div>
+      <h3 style="margin-bottom:12px;">英文处理</h3>
+      <div class="code-block">
+<span class="cmt">// 正则提取单词，过滤停用词</span>
+<span class="kw">const</span> words = text.match(/[a-z<span class="num">0</span>-<span class="num">9</span>]{<span class="num">2</span>,}/g)
+  .filter(w => !STOP_WORDS.has(w))
+
+<span class="cmt">// 例: "UAV beamforming optimization"</span>
+<span class="cmt">// &rarr; ["uav", "beamforming", "optimization"]</span>
+      </div>
+      <h3 style="margin:20px 0 12px;">停用词过滤</h3>
+      <div class="tag-row">
+        <span class="tag">the</span><span class="tag">is</span><span class="tag">are</span><span class="tag">have</span>
+        <span class="tag">was</span><span class="tag">will</span><span class="tag">can</span><span class="tag">but</span>
+        <span class="tag">not</span><span class="tag">this</span><span class="tag">that</span><span class="tag">with</span>
+        <span class="tag">for</span><span class="tag">from</span><span class="tag">and</span><span class="tag">or</span>
+      </div>
+      <div class="tag-row" style="margin-top:6px;">
+        <span class="tag">的了</span><span class="tag">是在</span><span class="tag">不是</span><span class="tag">和也</span>
+        <span class="tag">与有</span><span class="tag">也可</span><span class="tag">还是</span><span class="tag">也有</span>
+      </div>
+    </div>
+    <div>
+      <h3 style="margin-bottom:12px;">中文处理</h3>
+      <div class="code-block">
+<span class="cmt">// 短段（&le;4字）：整体作为一个词</span>
+"波束赋形" &rarr; ["波束赋形"]
+
+<span class="cmt">// 长段：bigram + trigram</span>
+"波束赋形优化方案"
+  bigrams:  波束赋、束赋形、赋形优、形优化、化方案
+  trigrams: 波束赋、束赋形、赋形优、形优化
+
+<span class="cmt">// 去重：被 trigram 覆盖的 bigram 移除</span>
+      </div>
+      <div class="highlight-box" style="margin-top:16px;">
+        <p class="desc"><strong style="color:var(--text);">设计理由：</strong>中文无空格分词，采用 N-gram 策略避免引入外部分词依赖。Trigram 捕获更长的语义单元，Bigram 补充未被覆盖的短词。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 7: Inverted Index ==================== -->
+<div class="slide" id="s7">
+  <span class="slide-number">07 / 10</span>
+  <h1>倒排索引与评分</h1>
+  <p class="subtitle">Hop 1: 关键词匹配 + 字段加权</p>
+  <div class="grid-2" style="flex:1;">
+    <div>
+      <h3 style="margin-bottom:12px;">索引结构</h3>
+      <div class="code-block">
+<span class="cmt">// term &rarr; [{pageKey, field}, ...]</span>
+<span class="kw">indexCache</span>: <span class="kw">Map</span>&lt;string, IndexEntry[]&gt;
+
+<span class="cmt">// 示例</span>
+"beamforming" &rarr; [
+  { pageKey: "analog-beamforming", field: "title" },
+  { pageKey: "hybrid-beamforming", field: "body" },
+  { pageKey: "mmwave-beamforming", field: "tag"   },
+]
+      </div>
+      <h3 style="margin:20px 0 12px;">字段权重</h3>
+      <div class="weight-bar">
+        <span class="label">title</span>
+        <div class="bar"><div class="bar-fill" style="width:100%;background:var(--green);"></div></div>
+        <span class="val">1.5x</span>
+      </div>
+      <div class="weight-bar">
+        <span class="label">tag</span>
+        <div class="bar"><div class="bar-fill" style="width:100%;background:var(--green);"></div></div>
+        <span class="val">1.5x</span>
+      </div>
+      <div class="weight-bar">
+        <span class="label">body</span>
+        <div class="bar"><div class="bar-fill" style="width:33%;background:var(--orange);"></div></div>
+        <span class="val">0.5x</span>
+      </div>
+      <p class="desc" style="margin-top:12px;font-size:12px;">标题和标签权重是正文的 3 倍，确保主题匹配优先于内容提及</p>
+    </div>
+    <div>
+      <h3 style="margin-bottom:12px;">评分示例</h3>
+      <div class="card" style="margin-bottom:12px;">
+        <p class="desc"><strong style="color:var(--text);">Query:</strong> "UAV 波束赋形优化"</p>
+        <div class="code-block" style="margin-top:8px;">
+Keywords: ["uav", "波束赋", "束赋形", "赋形优", "形优化"]
+
+Page "Hybrid Beamforming for UAV"
+  title: "uav" <span class="num">+1.5</span>, "beamforming" <span class="num">+1.5</span>
+  body:  "uav" <span class="num">+0.5</span>
+  tag:   "uav" <span class="num">+1.5</span>
+  Score = <span class="num">5.0</span> &check;
+
+Page "Analog Beamforming"
+  title: "beamforming" <span class="num">+1.5</span>
+  body:  "beamforming" <span class="num">+0.5</span>
+  Score = <span class="num">2.0</span>
+        </div>
+      </div>
+      <div class="card">
+        <p class="desc"><strong style="color:var(--text);">索引补充：</strong>还会匹配 <code>index.md</code>（知识库目录页）中的条目行，命中时额外加 <code>score × 0.8</code></p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 8: Wikilink Expansion ==================== -->
+<div class="slide" id="s8">
+  <span class="slide-number">08 / 10</span>
+  <h1>两跳关联扩展</h1>
+  <p class="subtitle">Hop 2: 通过 Wikilink 发现间接相关页面</p>
+  <div class="grid-2" style="flex:1;">
+    <div>
+      <div class="card card-accent-blue" style="margin-bottom:16px;">
+        <span class="badge badge-blue">Wikilink</span>
+        <h3>[[页面标题]] 语法</h3>
+        <p class="desc" style="margin-top:8px;">Wiki 页面间通过 <code>[[wikilink]]</code> 建立双向引用关系。摄取完成后自动交叉链接（crossLinkAllPages）。</p>
+      </div>
+      <h3 style="margin-bottom:10px;">算法逻辑</h3>
+      <ul class="feature-list">
+        <li>取 Hop1 得分 &ge; 1 的<strong>前 8 个页面</strong></li>
+        <li>读取这 8 个页面的正文，提取所有 <code>[[link]]</code></li>
+        <li>链接目标页面获得 <strong>0.5 分</strong>基础分</li>
+        <li>支持模糊标题匹配（大小写、别名变体）</li>
+        <li>已访问链接去重，避免重复加分</li>
+      </ul>
+    </div>
+    <div>
+      <h3 style="margin-bottom:12px;">关联发现示例</h3>
+      <div class="diagram" style="flex-direction:column; gap:8px; padding:0;">
+        <div class="flow-row" style="margin:0;">
+          <div class="flow-box" style="background:var(--green-dim);border-color:var(--green);color:var(--green);">
+            Page A: Hybrid Beamforming
+            <br><span style="font-size:11px;color:var(--text-muted);">Hop1 Score: 5.0</span>
+          </div>
+        </div>
+        <div style="text-align:center;color:var(--text-muted);font-size:12px;">包含 [[Constant-Modulus Constraint]] [[SDR]]</div>
+        <div class="flow-row" style="margin:0;">
+          <div class="flow-box" style="opacity:0.7;">Page B: CM Constraint</div>
+          <span style="color:var(--text-muted);font-size:12px;margin:0 8px;">+0.5</span>
+          <div class="flow-box" style="opacity:0.7;">Page C: SDR</div>
+        </div>
+      </div>
+      <div class="highlight-box">
+        <p class="desc"><strong style="color:var(--text);">价值：</strong>即使用户查询关键词未出现在 Page B/C 中，它们因与高分页面 A 存在 Wikilink 关联而被召回。这模拟了"相关主题推荐"的效果。</p>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 9: Context Injection ==================== -->
+<div class="slide" id="s9">
+  <span class="slide-number">09 / 10</span>
+  <h1>上下文注入与引用</h1>
+  <p class="subtitle">检索结果如何进入 AI 对话</p>
+  <div class="grid-2" style="flex:1;">
+    <div>
+      <h3 style="margin-bottom:10px;">System Prompt 结构</h3>
+      <div class="code-block">
+[Knowledge Base Context]
+The following is retrieved from the user's
+local knowledge base...
+
+CITATION RULES (MUST follow exactly):
+1. Insert [1], [2] markers
+2. References under "参考知识库文档："
+3. Format: [N]知识库{name}-title
+
+--- 知识库开始 ---
+知识库名称: 波束赋形知识库
+--- 知识库内容 ---
+## Analog Beamforming
+(正文内容)
+---
+## Hybrid Beamforming
+(正文内容)
+--- 知识库结束 ---
+[End Knowledge Base Context]
+      </div>
+    </div>
+    <div>
+      <h3 style="margin-bottom:10px;">引用溯源</h3>
+      <div class="card card-accent-pink" style="margin-bottom:12px;">
+        <p class="desc">AI 回答中的 <code>[1]</code> 标记通过前端预处理（<code>processCitationLinks</code>）转换为可点击链接：</p>
+        <div class="flow-row" style="margin-top:12px;">
+          <div class="flow-box" style="font-size:12px;">[1]知识库{1}-Title</div>
+          <div class="flow-arrow">&rarr;</div>
+          <div class="flow-box highlight" style="font-size:12px;">Wiki 页面跳转</div>
+        </div>
+      </div>
+      <h3 style="margin-bottom:10px;">关键参数</h3>
+      <div class="grid-2">
+        <div class="card" style="text-align:center;padding:16px;">
+          <div class="metric" style="font-size:28px;color:var(--green);">7</div>
+          <div class="metric-label">召回页面数</div>
+        </div>
+        <div class="card" style="text-align:center;padding:16px;">
+          <div class="metric" style="font-size:28px;color:var(--orange);">10K</div>
+          <div class="metric-label">Token 上限</div>
+        </div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<!-- ==================== Slide 10: Summary ==================== -->
+<div class="slide" id="s10">
+  <span class="slide-number">10 / 10</span>
+  <h1>设计总结</h1>
+  <p class="subtitle">核心特性一览</p>
+  <div class="table-wrap" style="flex:1;">
+    <table>
+      <thead>
+        <tr><th>特性</th><th>说明</th><th>优势</th></tr>
+      </thead>
+      <tbody>
+        <tr>
+          <td><span class="badge badge-green">检索方式</span></td>
+          <td>倒排索引 + 关键词匹配</td>
+          <td>无向量依赖，零外部服务调用</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-blue">分词策略</span></td>
+          <td>英文单词 + 中文 bigram/trigram</td>
+          <td>纯本地实现，支持中英文混合</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-orange">关联扩展</span></td>
+          <td>Wikilink 两跳扩散</td>
+          <td>发现间接相关页面，提高召回率</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-pink">上下文管理</span></td>
+          <td>10K Token 截断</td>
+          <td>控制成本，保证响应速度</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-green">引用溯源</span></td>
+          <td>[N] 标记 + 文末参考文献</td>
+          <td>可验证、可跳转的知识来源</td>
+        </tr>
+        <tr>
+          <td><span class="badge badge-blue">会话隔离</span></td>
+          <td>Per-Conversation KB 选择</td>
+          <td>不同对话使用不同知识库组合</td>
+        </tr>
+      </tbody>
+    </table>
+  </div>
+  <div class="highlight-box" style="text-align:center;">
+    <p class="desc" style="font-size:15px;"><strong style="color:var(--text);">纯本地 &middot; 零外部依赖 &middot; 毫秒级检索 &middot; 完整引用溯源</strong></p>
+  </div>
+</div>
+
+<!-- Navigation -->
+<div class="nav">
+  <button class="nav-btn" onclick="go(-1)">&larr;</button>
+  <div class="nav-dots" id="dots"></div>
+  <button class="nav-btn" onclick="go(1)">&rarr;</button>
+</div>
+
+<script>
+  const slides = document.querySelectorAll('.slide');
+  const total = slides.length;
+  let current = 0;
+
+  const dotsEl = document.getElementById('dots');
+  for (let i = 0; i < total; i++) {
+    const d = document.createElement('div');
+    d.className = 'nav-dot' + (i === 0 ? ' active' : '');
+    d.onclick = () => goTo(i);
+    dotsEl.appendChild(d);
+  }
+
+  function goTo(n) {
+    slides[current].classList.remove('active');
+    dotsEl.children[current].classList.remove('active');
+    current = Math.max(0, Math.min(n, total - 1));
+    slides[current].classList.add('active');
+    dotsEl.children[current].classList.add('active');
+  }
+
+  function go(dir) { goTo(current + dir); }
+
+  document.addEventListener('keydown', e => {
+    if (e.key === 'ArrowRight' || e.key === 'ArrowDown' || e.key === ' ') { e.preventDefault(); go(1); }
+    if (e.key === 'ArrowLeft' || e.key === 'ArrowUp') { e.preventDefault(); go(-1); }
+    if (e.key === 'Home') { e.preventDefault(); goTo(0); }
+    if (e.key === 'End') { e.preventDefault(); goTo(total - 1); }
+  });
+</script>
+</body>
+</html>

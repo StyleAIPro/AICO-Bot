@@ -166,6 +166,11 @@ export class KnowledgeBaseService {
   }
 
   createKnowledgeBase(input: CreateKnowledgeBaseInput): KnowledgeBase {
+    const existing = this.db.prepare('SELECT id FROM knowledge_bases WHERE name = ?').get(input.name);
+    if (existing) {
+      throw new Error('已有该知识库，请修改知识库名称');
+    }
+
     const id = crypto.randomUUID();
     const now = this.now();
 
@@ -471,7 +476,7 @@ export class KnowledgeBaseService {
     engine.crossLinkAllPages();
   }
 
-  async ingest(kbId: string, sourceId: string, signal?: AbortSignal): Promise<IngestResult> {
+  async ingest(kbId: string, sourceId: string, signal?: AbortSignal, skipIndexUpdate = false): Promise<IngestResult> {
     const sourceRow = this.db
       .prepare('SELECT * FROM kb_sources WHERE id = ? AND kb_id = ?')
       .get(sourceId, kbId) as Record<string, unknown> | undefined;
@@ -493,7 +498,7 @@ export class KnowledgeBaseService {
     this.db.prepare("UPDATE kb_sources SET status = 'ingesting' WHERE id = ?").run(sourceId);
 
     try {
-      const result = await engine.ingest(source, text, undefined, signal);
+      const result = await engine.ingest(source, text, undefined, signal, skipIndexUpdate);
 
       const now = this.now();
       this.db.prepare(
@@ -514,6 +519,46 @@ export class KnowledgeBaseService {
     }
   }
 
+  async ingestIncremental(kbId: string, signal?: AbortSignal): Promise<IngestResult & { errors: string[] }> {
+    const sources = this.listSources(kbId);
+    const toIngest = sources.filter((s) => s.status === 'pending');
+
+    if (toIngest.length === 0) {
+      return { pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0, summaryCreated: false, errors: [], newPages: [] };
+    }
+
+    const total: IngestResult & { errors: string[] } = {
+      pagesCreated: 0, pagesUpdated: 0, conceptsCount: 0, entitiesCount: 0,
+      summaryCreated: false, errors: [], newPages: [],
+    };
+
+    for (const source of toIngest) {
+      try {
+        const result = await this.ingest(kbId, source.id, signal, true);
+        total.pagesCreated += result.pagesCreated;
+        total.pagesUpdated += result.pagesUpdated;
+        total.conceptsCount += result.conceptsCount;
+        total.entitiesCount += result.entitiesCount;
+        if (result.summaryCreated) total.summaryCreated = true;
+        total.newPages.push(...result.newPages);
+      } catch (err: unknown) {
+        const message = err instanceof Error ? err.message : String(err);
+        total.errors.push(`${source.storedName}: ${message}`);
+      }
+    }
+
+    // Append new pages to existing index instead of rebuilding
+    if (total.newPages.length > 0) {
+      const kbPath = this.getKbPath(kbId);
+      const engine = new WikiEngine(kbPath, null as unknown as KbLlmCaller);
+      engine.appendIndex(total.newPages as Array<{ title: string; kind: 'concept' | 'entity' | 'summary' | 'conversation'; desc: string }>);
+      engine.crossLinkAllPages();
+    }
+
+    this.recountPages(kbId);
+    return total;
+  }
+
   async ingestAll(kbId: string): Promise<IngestResult & { errors: string[] }> {
     const sources = this.listSources(kbId);
     const toIngest = sources.filter((s) => s.status !== 'ingesting');
@@ -525,6 +570,7 @@ export class KnowledgeBaseService {
       entitiesCount: 0,
       summaryCreated: false,
       errors: [],
+      newPages: [],
     };
 
     if (toIngest.length === 0) {
@@ -564,6 +610,7 @@ export class KnowledgeBaseService {
       entitiesCount: 0,
       summaryCreated: false,
       errors: [],
+      newPages: [],
     };
 
     if (sources.length === 0) {
@@ -606,7 +653,18 @@ export class KnowledgeBaseService {
 
   async lint(kbId: string): Promise<LintResult> {
     const engine = await this.createWikiEngine(kbId);
-    return engine.lint();
+    const existingSourceIds = new Set(this.listSources(kbId).map((s) => s.id));
+    return engine.lint(existingSourceIds);
+  }
+
+  async generateReport(kbId: string): Promise<string> {
+    const engine = await this.createWikiEngine(kbId);
+    return engine.generateReport();
+  }
+
+  async loadReport(kbId: string): Promise<string | null> {
+    const engine = await this.createWikiEngine(kbId);
+    return engine.loadReport();
   }
 
   async audit(kbId: string, correction: AuditCorrection): Promise<void> {
@@ -636,8 +694,12 @@ export class KnowledgeBaseService {
   }
 
   resetIngestingSources(kbId: string): void {
+    // Previously compiled files (ingested_at is set) should revert to 'compiled', not 'pending'
     this.db.prepare(
-      "UPDATE kb_sources SET status = 'pending', error_message = '' WHERE kb_id = ? AND status = 'ingesting'",
+      "UPDATE kb_sources SET status = 'compiled', error_message = '' WHERE kb_id = ? AND status = 'ingesting' AND ingested_at IS NOT NULL",
+    ).run(kbId);
+    this.db.prepare(
+      "UPDATE kb_sources SET status = 'pending', error_message = '' WHERE kb_id = ? AND status = 'ingesting' AND ingested_at IS NULL",
     ).run(kbId);
   }
 
@@ -675,17 +737,18 @@ export class KnowledgeBaseService {
 
   getGraphData(kbId: string): { nodes: Array<{ id: string; title: string; type: string; tags: string[] }>; links: Array<{ source: string; target: string }> } {
     const pages = this.listWikiPages(kbId);
+    const kbPath = this.getKbPath(kbId);
+    const wikiDir = path.join(kbPath, 'wiki');
 
-    // Parse tags from frontmatter for each page
     interface PageNode {
       id: string;
       title: string;
       type: string;
       tags: string[];
+      filePath: string;
     }
 
-    const nodes: PageNode[] = pages.map((p) => {
-      const kbPath = this.getKbPath(kbId);
+    const pageNodes: PageNode[] = pages.map((p) => {
       const fullPath = path.join(kbPath, 'wiki', p.path);
       const tags: string[] = [];
       if (fs.existsSync(fullPath)) {
@@ -698,56 +761,103 @@ export class KnowledgeBaseService {
           }
         }
       }
-      return { id: p.title, title: p.title, type: p.type, tags };
+      return { id: p.path, title: p.title, type: p.type, tags, filePath: fullPath };
     });
+
+    // Add index.md as a node
+    const indexPath = path.join(wikiDir, 'index.md');
+    const indexNode: PageNode | null = fs.existsSync(indexPath)
+      ? { id: 'index', title: 'index', type: 'index', tags: [], filePath: indexPath }
+      : null;
+    if (indexNode) pageNodes.push(indexNode);
 
     const links: Array<{ source: string; target: string }> = [];
     const linkSet = new Set<string>();
 
-    // 1. Tag-based links: pages sharing the same tag are connected
-    const tagToPages = new Map<string, string[]>();
-    for (const node of nodes) {
+    // 1. Tag nodes: each unique tag becomes a small node, pages link to their tags
+    const allTags = new Set<string>();
+    for (const node of pageNodes) {
+      for (const tag of node.tags) allTags.add(tag);
+    }
+    const tagNodes: PageNode[] = Array.from(allTags).map((tag) => ({
+      id: `__tag__${tag}`,
+      title: tag,
+      type: 'tag',
+      tags: [],
+      filePath: '',
+    }));
+    for (const node of pageNodes) {
       for (const tag of node.tags) {
-        if (!tagToPages.has(tag)) tagToPages.set(tag, []);
-        tagToPages.get(tag)!.push(node.id);
+        const tagId = `__tag__${tag}`;
+        const key = [node.id, tagId].sort().join('|||');
+        if (!linkSet.has(key)) {
+          linkSet.add(key);
+          links.push({ source: node.id, target: tagId });
+        }
       }
     }
-    for (const [, pageIds] of Array.from(tagToPages)) {
-      for (let i = 0; i < pageIds.length; i++) {
-        for (let j = i + 1; j < pageIds.length; j++) {
-          const key = [pageIds[i], pageIds[j]].sort().join('|||');
+
+    // 2. Same-title cross-type links: pages with identical titles but different types should be connected
+    const titleToNodes = new Map<string, PageNode[]>();
+    for (const node of pageNodes) {
+      const key = node.title.toLowerCase().trim();
+      if (!titleToNodes.has(key)) titleToNodes.set(key, []);
+      titleToNodes.get(key)!.push(node);
+    }
+    for (const [, nodesWithTitle] of Array.from(titleToNodes)) {
+      for (let i = 0; i < nodesWithTitle.length; i++) {
+        for (let j = i + 1; j < nodesWithTitle.length; j++) {
+          if (nodesWithTitle[i].type === nodesWithTitle[j].type) continue;
+          const key = [nodesWithTitle[i].id, nodesWithTitle[j].id].sort().join('|||');
           if (!linkSet.has(key)) {
             linkSet.add(key);
-            links.push({ source: pageIds[i], target: pageIds[j] });
+            links.push({ source: nodesWithTitle[i].id, target: nodesWithTitle[j].id });
           }
         }
       }
     }
 
-    // 2. Wikilink-based connections
-    const titleMap = new Map<string, string>();
-    for (const n of nodes) {
-      titleMap.set(n.id.toLowerCase().trim(), n.id);
+    // 3. Wikilink-based connections (page → page)
+    // titleMap maps lowercase title → array of node ids (handles same-title different-type pages)
+    const titleMap = new Map<string, string[]>();
+    for (const n of pageNodes) {
+      const key = n.title.toLowerCase().trim();
+      if (!titleMap.has(key)) titleMap.set(key, []);
+      titleMap.get(key)!.push(n.id);
     }
-    for (const page of pages) {
-      const kbPath = this.getKbPath(kbId);
-      const fullPath = path.join(kbPath, 'wiki', page.path);
-      if (!fs.existsSync(fullPath)) continue;
-      const content = fs.readFileSync(fullPath, 'utf-8');
-      const matches = content.matchAll(/\[\[([^\]]+)\]\]/g);
+    for (const node of pageNodes) {
+      if (!fs.existsSync(node.filePath)) continue;
+      const content = fs.readFileSync(node.filePath, 'utf-8');
+      const matches = content.matchAll(/\[\[([^\[\]]+)\]\]/g);
       for (const match of matches) {
-        const target = match[1].trim();
-        const canonicalTitle = titleMap.get(target.toLowerCase());
-        if (canonicalTitle && canonicalTitle !== page.title) {
-          const key = [page.title, canonicalTitle].sort().join('|||');
-          if (!linkSet.has(key)) {
-            linkSet.add(key);
-            links.push({ source: page.title, target: canonicalTitle });
+        const target = match[1].split('|')[0].trim();
+        const matchedIds = titleMap.get(target.toLowerCase());
+        if (matchedIds) {
+          for (const targetId of matchedIds) {
+            if (targetId === node.id) continue;
+            const key = [node.id, targetId].sort().join('|||');
+            if (!linkSet.has(key)) {
+              linkSet.add(key);
+              links.push({ source: node.id, target: targetId });
+            }
           }
         }
       }
     }
 
+    // 4. Index connects to all other page nodes
+    if (indexNode) {
+      for (const node of pageNodes) {
+        if (node.id === 'index') continue;
+        const key = ['index', node.id].sort().join('|||');
+        if (!linkSet.has(key)) {
+          linkSet.add(key);
+          links.push({ source: 'index', target: node.id });
+        }
+      }
+    }
+
+    const nodes = [...pageNodes, ...tagNodes];
     return { nodes, links };
   }
 
@@ -767,6 +877,8 @@ export class KnowledgeBaseService {
       throw new Error(`Wiki page not found: ${pagePath}`);
     }
     fs.writeFileSync(fullPath, content, 'utf-8');
+    const reportPath = path.join(kbPath, 'wiki', '_report.md');
+    if (fs.existsSync(reportPath)) fs.unlinkSync(reportPath);
   }
 
   deleteWikiPage(kbId: string, pagePath: string): void {
@@ -805,21 +917,25 @@ export class KnowledgeBaseService {
     }
 
     const pageContent = fs.readFileSync(targetFullPath, 'utf-8');
-    const outgoing = Array.from(pageContent.matchAll(/\[\[([^\]]+)\]\]/g)).map((m) => m[1]);
+    const titleMatch = pageContent.match(/^title:\s*"?([^"\n]+)"?/m);
+    const thisTitle = titleMatch ? titleMatch[1].trim() : '';
+    const skipTargets = new Set<string>(['log', '_report', ...thisTitle ? [thisTitle] : []]);
+
+    const outgoing = Array.from(pageContent.matchAll(/\[\[([^\]]+)\]\]/g))
+      .map((m) => m[1].split('|')[0].trim())
+      .filter((t) => !skipTargets.has(t.toLowerCase()));
 
     const incoming: string[] = [];
     const mdFiles = this.readdirRecursive(wikiDir, '.md');
     for (const fp of mdFiles) {
       if (fp === targetFullPath) continue;
       const raw = fs.readFileSync(fp, 'utf-8');
+      const otherTitleMatch = raw.match(/^title:\s*"?([^"\n]+)"?/m);
+      const otherTitle = otherTitleMatch ? otherTitleMatch[1].trim() : path.basename(fp, '.md');
+      if (skipTargets.has(otherTitle.toLowerCase())) continue;
       const links = Array.from(raw.matchAll(/\[\[([^\]]+)\]\]/g)).map((m) => m[1]);
-      if (links.length > 0) {
-        const titleMatch = pageContent.match(/^title:\s*"?([^"\n]+)"?/m);
-        const thisTitle = titleMatch ? titleMatch[1].trim() : path.basename(pagePath, '.md');
-        if (links.includes(thisTitle)) {
-          const otherTitleMatch = raw.match(/^title:\s*"?([^"\n]+)"?/m);
-          incoming.push(otherTitleMatch ? otherTitleMatch[1].trim() : path.basename(fp, '.md'));
-        }
+      if (links.length > 0 && thisTitle && links.includes(thisTitle)) {
+        incoming.push(otherTitle);
       }
     }
     return { outgoing, incoming };

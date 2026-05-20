@@ -1,9 +1,8 @@
 import type { WikiPage } from './types';
 import { WikiEngine } from './wiki-engine';
 import fs from 'node:fs';
-import path from 'node:path';
 
-const DEFAULT_MAX_TOKENS = 4000;
+const DEFAULT_MAX_TOKENS = 10000;
 const CHARS_PER_TOKEN = 4;
 
 export class KbRetriever {
@@ -17,11 +16,10 @@ export class KbRetriever {
     userMessage: string,
     maxTokens: number = DEFAULT_MAX_TOKENS,
   ): Promise<string | null> {
-    const relevantPages = this.wikiEngine.findRelevantPages(userMessage, 3);
+    const relevantPages = this.wikiEngine.findRelevantPages(userMessage, 7);
+    console.log(`[KbRetriever] query="${userMessage.slice(0, 40)}" → ${relevantPages.length} pages`);
 
-    if (relevantPages.length === 0) {
-      return null;
-    }
+    if (relevantPages.length === 0) return null;
 
     const sections: string[] = [];
 
@@ -33,7 +31,7 @@ export class KbRetriever {
       sections.push(`## ${page.title}\n${body}`);
     }
 
-    const fullContext = sections.join('\n\n');
+    const fullContext = sections.join('\n\n---\n\n');
 
     if (fullContext.trim().length === 0) {
       return null;

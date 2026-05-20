@@ -2,12 +2,14 @@ import { useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   BookOpen,
+  Library,
   Plus,
   Upload,
   FileText,
   Search,
   Trash2,
   RefreshCw,
+  GitMerge,
   AlertTriangle,
   Loader2,
   ArrowLeft,
@@ -24,6 +26,85 @@ import { KnowledgeGraph } from '@/components/knowledge-base/KnowledgeGraph';
 import { useAppStore } from '@/stores/app.store';
 import { useSpaceStore } from '@/stores/space.store';
 import { Header } from '@/components/layout/Header';
+
+function ReportContent({ content }: { content: string }) {
+  const lines = content.split('\n');
+  const elements: React.ReactNode[] = [];
+
+  for (let i = 0; i < lines.length; i++) {
+    const line = lines[i];
+
+    if (line.startsWith('# ')) {
+      elements.push(<h1 key={i} className="text-lg font-bold mb-4 pb-2 border-b border-border">{line.slice(2)}</h1>);
+    } else if (line.startsWith('## ')) {
+      elements.push(<h2 key={i} className="text-sm font-semibold mt-6 mb-3 text-primary">{line.slice(3)}</h2>);
+    } else if (line.startsWith('### ')) {
+      elements.push(<h3 key={i} className="text-sm font-medium mt-4 mb-2">{line.slice(4)}</h3>);
+    } else if (line.startsWith('- ')) {
+      elements.push(
+        <div key={i} className="flex gap-2 text-sm leading-relaxed ml-1 mb-1">
+          <span className="text-muted-foreground mt-0.5 select-none">•</span>
+          <span dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(line.slice(2)) }} />
+        </div>,
+      );
+    } else if (line.trim() === '') {
+      elements.push(<div key={i} className="h-2" />);
+    } else {
+      elements.push(
+        <p key={i} className="text-sm leading-relaxed mb-1" dangerouslySetInnerHTML={{ __html: formatInlineMarkdown(line) }} />,
+      );
+    }
+  }
+
+  return <div className="p-6">{elements}</div>;
+}
+
+function formatInlineMarkdown(text: string): string {
+  return text
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>')
+    .replace(/`(.+?)`/g, '<code class="text-xs bg-muted px-1 py-0.5 rounded">$1</code>');
+}
+
+/** Slugify a page title to match wiki page file paths. */
+function slugify(title: string): string {
+  return title
+    .toLowerCase()
+    .replace(/[\s/()]+/g, '-')
+    .replace(/[()[\]{}]/g, '')
+    .replace(/-+/g, '-')
+    .replace(/^-|-$/g, '');
+}
+
+/** Find a wiki page matching the given title using multiple strategies. */
+function findMatchingPage(
+  pages: Array<{ title: string; path: string }>,
+  pageTitle: string,
+): { title: string; path: string } | undefined {
+  // 1. Exact title match
+  const exact = pages.find((pg) => pg.title === pageTitle);
+  if (exact) return exact;
+
+  // 2. Case-insensitive title match
+  const ci = pages.find((pg) => pg.title.toLowerCase() === pageTitle.toLowerCase());
+  if (ci) return ci;
+
+  // 3. Path ends with slugified title
+  const slug = slugify(pageTitle);
+  const bySlug = pages.find((pg) => pg.path.toLowerCase().replace(/\.md$/, '').endsWith(slug));
+  if (bySlug) return bySlug;
+
+  // 4. Path contains key words from the title (last resort)
+  const words = pageTitle.toLowerCase().split(/\s+/).filter((w) => w.length > 3);
+  if (words.length > 0) {
+    const byWords = pages.find((pg) =>
+      words.every((w) => pg.title.toLowerCase().includes(w) || pg.path.toLowerCase().includes(w.toLowerCase())),
+    );
+    if (byWords) return byWords;
+  }
+
+  return undefined;
+}
 
 export function KnowledgePage() {
   const { t } = useTranslation();
@@ -48,24 +129,28 @@ export function KnowledgePage() {
     removeSource,
     loadWikiPages,
     ingestAll,
+    ingestIncremental,
     cancelIngest,
     recompile,
-    compile,
     lint,
+    generateReport,
+    loadReport,
     query,
     clearError,
     wikiUpdatedCounter,
   } = useKnowledgeBaseStore();
 
   const [queryInput, setQueryInput] = useState('');
+  const [lintResult, setLintResult] = useState<{ issues: Array<{ type: string; severity: string; file: string; detail: string; relatedFile?: string }>; totalPages: number; healthScore: number } | null>(null);
   const [queryAnswer, setQueryAnswer] = useState('');
   const [queryCited, setQueryCited] = useState<string[]>([]);
+  const [reportContent, setReportContent] = useState<string | null>(null);
   const [showCreateForm, setShowCreateForm] = useState(false);
   const [newKbName, setNewKbName] = useState('');
   const [newKbDesc, setNewKbDesc] = useState('');
   const [expandedPage, setExpandedPage] = useState<string | null>(null);
   const [pageContent, setPageContent] = useState('');
-  const [activeTab, setActiveTab] = useState<'sources' | 'pages' | 'query' | 'index' | 'graph'>('sources');
+  const [activeTab, setActiveTab] = useState<'sources' | 'pages' | 'query' | 'index' | 'graph' | 'lint' | 'report'>('sources');
   const [editingPagePath, setEditingPagePath] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
   const [saveStatus, setSaveStatus] = useState<string | null>(null);
@@ -89,12 +174,47 @@ export function KnowledgePage() {
 
   useEffect(() => {
     if (currentKb) {
-      setActiveTab('sources');
+      // If navigating from a citation click, don't reset to sources tab
+      const pending = useKnowledgeBaseStore.getState().pendingPageExpand;
+      if (!pending) {
+        setActiveTab('sources');
+      }
       loadSources(currentKb.id);
-      loadWikiPages(currentKb.id);
+      loadWikiPages(currentKb.id).then(() => {
+        const p = useKnowledgeBaseStore.getState().pendingPageExpand;
+        if (p && p.kbId === currentKb.id) {
+          const pages = useKnowledgeBaseStore.getState().wikiPages;
+          const match = findMatchingPage(pages, p.pageTitle);
+          if (match) {
+            setActiveTab('pages');
+            setExpandedPage(match.path);
+            setEditingPagePath(null);
+            setPageContent(t('kb.loading'));
+            setPageLinks({ outgoing: [], incoming: [] });
+            import('@/api/knowledge-base').then((kbApi) => {
+              Promise.all([
+                kbApi.kbReadPage(p.kbId, match.path),
+                kbApi.kbGetPageLinks(p.kbId, match.path),
+              ]).then(([pageRes, linksRes]) => {
+                if (pageRes.success) setPageContent(pageRes.data as string);
+                if (linksRes.success) setPageLinks(linksRes.data as { outgoing: string[]; incoming: string[] });
+              });
+            });
+            useKnowledgeBaseStore.getState().clearPendingPageExpand();
+          }
+        }
+      });
       setGraphData(null);
+      setLintResult(null);
+      setQueryAnswer('');
+      setQueryCited([]);
+      setQueryInput('');
+      (async () => {
+        const cached = await loadReport(currentKb.id);
+        setReportContent(cached);
+      })();
     }
-  }, [currentKb, loadSources, loadWikiPages]);
+  }, [currentKb, loadSources, loadWikiPages, t]);
 
   useEffect(() => {
     if (wikiUpdatedCounter > 0 && currentKb && activeTab === 'graph') {
@@ -109,9 +229,11 @@ export function KnowledgePage() {
   const handleCreate = async () => {
     if (!newKbName.trim()) return;
     await createKnowledgeBase({ name: newKbName.trim(), description: newKbDesc.trim() || undefined });
-    setNewKbName('');
-    setNewKbDesc('');
-    setShowCreateForm(false);
+    if (!useKnowledgeBaseStore.getState().error) {
+      setNewKbName('');
+      setNewKbDesc('');
+      setShowCreateForm(false);
+    }
   };
 
   const handleDelete = async (id: string, name: string) => {
@@ -194,7 +316,7 @@ export function KnowledgePage() {
       {/* Tab Bar */}
       <div className="flex items-center justify-between px-6 py-4 border-b border-border flex-shrink-0">
         <div className="flex items-center gap-2">
-          <BookOpen className="w-5 h-5 text-primary" />
+          <Library className="w-5 h-5 text-emerald-500" />
           <h1 className="text-lg font-semibold">{t('kb.title')}</h1>
         </div>
         <button
@@ -265,7 +387,7 @@ export function KnowledgePage() {
               <span>{t('kb.ingesting', { current: ingestProgress.current, total: ingestProgress.total, fileName: ingestProgress.fileName })}</span>
             </div>
             <div className="flex items-center gap-2">
-              {loadingAction === 'ingest' && currentKb && (
+              {(loadingAction === 'ingest' || loadingAction === 'fullIngest') && currentKb && (
                 <button
                   onClick={() => cancelIngest(currentKb.id)}
                   className="text-xs text-muted-foreground hover:text-destructive transition-colors px-2 py-0.5 rounded hover:bg-destructive/10"
@@ -351,10 +473,18 @@ export function KnowledgePage() {
                 </button>
                 <button
                   onClick={() => ingestAll(currentKb.id)}
-                  disabled={loadingAction === 'ingest'}
+                  disabled={loadingAction === 'fullIngest' || loadingAction === 'ingest'}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50"
                 >
-                  {loadingAction === 'ingest' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  {loadingAction === 'fullIngest' ? <Loader2 className="w-4 h-4 animate-spin" /> : <RefreshCw className="w-4 h-4" />}
+                  {t('kb.fullIngest')}
+                </button>
+                <button
+                  onClick={() => ingestIncremental(currentKb.id)}
+                  disabled={loadingAction === 'ingest' || loadingAction === 'fullIngest'}
+                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50"
+                >
+                  {loadingAction === 'ingest' ? <Loader2 className="w-4 h-4 animate-spin" /> : <GitMerge className="w-4 h-4" />}
                   {t('kb.incrementalIngest')}
                 </button>
                 <button
@@ -370,21 +500,12 @@ export function KnowledgePage() {
                 </button>
                 <button
                   onClick={async () => {
-                    await compile(currentKb.id);
-                    setGraphData(null);
-                    const kbApi = await import('@/api/knowledge-base');
-                    const res = await kbApi.kbGetGraph(currentKb.id);
-                    if (res.success) setGraphData(res.data as typeof graphData);
-                    setActiveTab('graph');
+                    if (!currentKb) return;
+                    setLintResult(null);
+                    setActiveTab('lint');
+                    const data = await lint(currentKb.id);
+                    setLintResult(data as typeof lintResult);
                   }}
-                  disabled={loadingAction === 'compile'}
-                  className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50"
-                >
-                  {loadingAction === 'compile' ? <Loader2 className="w-4 h-4 animate-spin" /> : <FileText className="w-4 h-4" />}
-                  {t('kb.compile')}
-                </button>
-                <button
-                  onClick={() => lint(currentKb.id)}
                   disabled={loadingAction === 'lint'}
                   className="flex items-center gap-1.5 px-3 py-1.5 text-sm border border-border rounded-lg hover:bg-secondary transition-colors disabled:opacity-50"
                 >
@@ -462,6 +583,31 @@ export function KnowledgePage() {
                     {t('kb.knowledgeGraph')}
                   </button>
                   <button
+                    onClick={() => {
+                      setActiveTab('report');
+                      if (!reportContent) {
+                        (async () => {
+                          if (!currentKb) return;
+                          const cached = await loadReport(currentKb.id);
+                          if (cached) {
+                            setReportContent(cached);
+                            return;
+                          }
+                          const result = await generateReport(currentKb.id);
+                          if (result) setReportContent(result);
+                        })();
+                      }
+                    }}
+                    className={`px-3 py-2 text-sm transition-colors ${
+                      activeTab === 'report'
+                        ? 'border-b-2 border-primary text-foreground font-medium'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {loadingAction === 'report' ? <Loader2 className="w-3.5 h-3.5 animate-spin inline" /> : <FileText className="w-3.5 h-3.5 inline" />}
+                    <span className="ml-1">{t('kb.report')}</span>
+                  </button>
+                  <button
                     onClick={() => setActiveTab('query')}
                     className={`px-3 py-2 text-sm transition-colors ${
                       activeTab === 'query'
@@ -470,6 +616,16 @@ export function KnowledgePage() {
                     }`}
                   >
                     {t('kb.query')}
+                  </button>
+                  <button
+                    onClick={() => setActiveTab('lint')}
+                    className={`px-3 py-2 text-sm transition-colors ${
+                      activeTab === 'lint'
+                        ? 'border-b-2 border-primary text-foreground font-medium'
+                        : 'text-muted-foreground hover:text-foreground'
+                    }`}
+                  >
+                    {t('kb.lint')}
                   </button>
                 </div>
                 {(activeTab === 'sources' && sources.length > 0 || activeTab === 'pages' && wikiPages.length > 0) && (
@@ -765,8 +921,79 @@ export function KnowledgePage() {
               )}
 
               {activeTab === 'index' && (
-                <div className="p-4 bg-muted/30 rounded-lg border border-border">
-                  <pre className="whitespace-pre-wrap text-sm leading-relaxed max-h-[60vh] overflow-y-auto">{indexContent}</pre>
+                <div className="max-h-[60vh] overflow-y-auto">
+                  {!indexContent || indexContent === t('kb.loading') ? (
+                    <div className="flex flex-col items-center justify-center py-12">
+                      <Loader2 className="w-6 h-6 animate-spin text-muted-foreground mb-3" />
+                      <span className="text-sm text-muted-foreground">{t('kb.loading')}</span>
+                    </div>
+                  ) : (() => {
+                    const lines = indexContent.trim().split('\n');
+                    const groups: Array<{ heading: string; items: Array<{ title: string; desc: string }> }> = [];
+                    let currentHeading = '';
+                    let currentItems: Array<{ title: string; desc: string }> = [];
+                    for (const line of lines) {
+                      const trimmed = line.trim();
+                      if (!trimmed) continue;
+                      if (trimmed.startsWith('## ')) {
+                        if (currentItems.length > 0) groups.push({ heading: currentHeading, items: [...currentItems] });
+                        currentHeading = trimmed.slice(3);
+                        currentItems = [];
+                      } else if (trimmed.startsWith('# ')) {
+                        continue;
+                      } else if (trimmed.startsWith('- ')) {
+                        const match = trimmed.slice(2).match(/^\[\[([^\]]+)\]\]\s*[—\-–]\s*(.*)/);
+                        if (match) currentItems.push({ title: match[1], desc: match[2] || '' });
+                      }
+                    }
+                    if (currentItems.length > 0) groups.push({ heading: currentHeading, items: [...currentItems] });
+                    return groups.length === 0 ? (
+                      <pre className="text-sm text-muted-foreground whitespace-pre-wrap break-words px-2">{indexContent}</pre>
+                    ) : (
+                      <div className="space-y-5 px-1">
+                        {groups.map((group) => (
+                          <div key={group.heading}>
+                            <div className="text-xs font-medium text-muted-foreground mb-1.5 tracking-wide">{group.heading} ({group.items.length})</div>
+                            <div className="space-y-0.5">
+                              {group.items.map((item) => {
+                                const page = wikiPages.find((p) => p.title === item.title);
+                                return (
+                                  <div
+                                    key={item.title}
+                                    className="flex items-baseline gap-1.5 px-2 py-1 rounded hover:bg-secondary transition-colors cursor-pointer text-sm group"
+                                    onClick={() => {
+                                      if (page) {
+                                        setActiveTab('pages');
+                                        setExpandedPage(page.path);
+                                        setEditingPagePath(null);
+                                        setPageContent(t('kb.loading'));
+                                        setPageLinks({ outgoing: [], incoming: [] });
+                                        (async () => {
+                                          try {
+                                            const kbApi = await import('@/api/knowledge-base');
+                                            const [pageRes, linksRes] = await Promise.all([
+                                              kbApi.kbReadPage(currentKb!.id, page.path),
+                                              kbApi.kbGetPageLinks(currentKb!.id, page.path),
+                                            ]);
+                                            if (pageRes.success) setPageContent(pageRes.data as string);
+                                            if (linksRes.success) setPageLinks(linksRes.data as { outgoing: string[]; incoming: string[] });
+                                          } catch { /* ignore */ }
+                                        })();
+                                      }
+                                    }}
+                                  >
+                                    <span className="shrink-0 text-muted-foreground/50 select-none">•</span>
+                                    <span className="group-hover:text-primary transition-colors">{item.title}</span>
+                                    {item.desc && <span className="text-xs text-muted-foreground truncate">{item.desc}</span>}
+                                  </div>
+                                );
+                              })}
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    );
+                  })()}
                 </div>
               )}
 
@@ -776,7 +1003,7 @@ export function KnowledgePage() {
                     <KnowledgeGraph
                       data={graphData}
                       onNodeClick={(nodeId) => {
-                        const page = wikiPages.find((p) => p.title === nodeId);
+                        const page = wikiPages.find((p) => p.path === nodeId);
                         if (page) {
                           setActiveTab('pages');
                           setExpandedPage(page.path);
@@ -817,11 +1044,11 @@ export function KnowledgePage() {
                       onKeyDown={(e) => e.key === 'Enter' && handleQuery()}
                       placeholder={t('kb.queryPlaceholder')}
                       className="flex-1 px-3 py-2 text-sm bg-background border border-border rounded-lg focus:outline-none focus:ring-1 focus:ring-primary"
-                      disabled={loading}
+                      disabled={loadingAction === 'query'}
                     />
                     <button
                       onClick={handleQuery}
-                      disabled={loading || !queryInput.trim()}
+                      disabled={loadingAction === 'query' || !queryInput.trim()}
                       className="flex items-center gap-1.5 px-4 py-2 text-sm bg-primary text-primary-foreground rounded-lg hover:bg-primary/90 transition-colors disabled:opacity-50"
                     >
                       {loading ? <Loader2 className="w-4 h-4 animate-spin" /> : <Search className="w-4 h-4" />}
@@ -851,6 +1078,141 @@ export function KnowledgePage() {
                   )}
                 </div>
               )}
+
+              {activeTab === 'lint' && (
+                <div>
+                  {loadingAction === 'lint' ? (
+                    <div className="flex items-center justify-center py-12">
+                      <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                      <span className="ml-2 text-sm text-muted-foreground">{t('kb.lintRunning')}</span>
+                    </div>
+                  ) : lintResult ? (
+                    <div className="space-y-4">
+                      {/* Overview */}
+                      <div className="rounded-lg border border-border p-4">
+                        <h3 className="text-sm font-medium mb-3">{t('kb.lintResult')}</h3>
+                        <div className="flex items-center gap-5">
+                          <div className="flex-shrink-0 flex flex-col items-center">
+                            <div className={`w-16 h-16 rounded-full flex items-center justify-center text-lg font-bold ${
+                              lintResult.healthScore >= 80 ? 'bg-green-50 text-green-600 dark:bg-green-900/20 dark:text-green-400'
+                                : lintResult.healthScore >= 50 ? 'bg-yellow-50 text-yellow-600 dark:bg-yellow-900/20 dark:text-yellow-400'
+                                : 'bg-red-50 text-red-600 dark:bg-red-900/20 dark:text-red-400'
+                            }`}>
+                              {lintResult.healthScore}
+                            </div>
+                            <span className="text-[10px] text-muted-foreground mt-1">Health</span>
+                          </div>
+                          <div className="flex-1 grid grid-cols-3 gap-3">
+                            <div className="rounded-md bg-muted/50 p-2.5 text-center">
+                              <div className="text-lg font-semibold">{lintResult.totalPages}</div>
+                              <div className="text-[10px] text-muted-foreground">{t('kb.lintTotalPages')}</div>
+                            </div>
+                            <div className="rounded-md bg-red-50 dark:bg-red-900/20 p-2.5 text-center">
+                              <div className="text-lg font-semibold text-red-600 dark:text-red-400">{lintResult.issues.filter(i => i.severity === 'error').length}</div>
+                              <div className="text-[10px] text-red-500 dark:text-red-400">{t('kb.lintErrors')}</div>
+                            </div>
+                            <div className="rounded-md bg-yellow-50 dark:bg-yellow-900/20 p-2.5 text-center">
+                              <div className="text-lg font-semibold text-yellow-600 dark:text-yellow-400">{lintResult.issues.filter(i => i.severity === 'warning').length}</div>
+                              <div className="text-[10px] text-yellow-500 dark:text-yellow-400">{t('kb.lintWarnings')}</div>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+
+                      {lintResult.issues.length === 0 ? (
+                        <div className="text-sm text-muted-foreground text-center py-8">{t('kb.lintNoIssues')}</div>
+                      ) : (
+                        <>
+                          {/* Distribution */}
+                          <div className="rounded-lg border border-border p-4">
+                            <h4 className="text-xs font-medium text-muted-foreground mb-2">{t('kb.lintDistribution')}</h4>
+                            {(() => {
+                              const typeOrder = ['empty_body', 'missing_frontmatter', 'empty_tags', 'missing_source', 'undersized_page', 'oversized_page', 'duplicate_title'];
+                              const counts = new Map<string, number>();
+                              for (const issue of lintResult.issues) {
+                                counts.set(issue.type, (counts.get(issue.type) ?? 0) + 1);
+                              }
+                              return (
+                                <div className="grid grid-cols-3 gap-2">
+                                  {typeOrder.map((type) => {
+                                    const count = counts.get(type) ?? 0;
+                                    if (count === 0) return null;
+                                    return (
+                                      <div key={type} className="flex items-center gap-2 rounded-md bg-muted/50 px-3 py-2">
+                                        <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                                          type === 'empty_body' ? 'bg-red-500'
+                                            : 'bg-yellow-500'
+                                        }`} />
+                                        <span className="text-xs truncate">{t(`kb.lintType.${type}`)}</span>
+                                        <span className="text-xs font-semibold text-muted-foreground ml-auto">{count}</span>
+                                      </div>
+                                    );
+                                  })}
+                                </div>
+                              );
+                            })()}
+                          </div>
+
+                          {/* Detail */}
+                          <div className="rounded-lg border border-border p-4">
+                            <h4 className="text-xs font-medium text-muted-foreground mb-2">{t('kb.lintDetail')}</h4>
+                            <div className="space-y-1.5 max-h-72 overflow-y-auto">
+                              {lintResult.issues.map((issue, i) => (
+                                <div key={i} className={`flex items-start gap-2 text-xs p-2 rounded ${
+                                  issue.severity === 'error' ? 'bg-red-50 dark:bg-red-900/20' : 'bg-yellow-50 dark:bg-yellow-900/20'
+                                }`}>
+                                  <span className={`flex-shrink-0 mt-0.5 ${issue.severity === 'error' ? 'text-red-500' : 'text-yellow-500'}`}>
+                                    {issue.severity === 'error' ? '✕' : '⚠'}
+                                  </span>
+                                  <div className="min-w-0 flex-1">
+                                    <div className="flex items-center gap-1.5">
+                                      <span className={`text-[10px] px-1.5 py-0.5 rounded ${
+                                        issue.severity === 'error' ? 'bg-red-100 text-red-600 dark:bg-red-900/40 dark:text-red-300'
+                                          : 'bg-yellow-100 text-yellow-600 dark:bg-yellow-900/40 dark:text-yellow-300'
+                                      }`}>{t(`kb.lintType.${issue.type}`)}</span>
+                                    </div>
+                                    <div className="flex items-center gap-1 truncate mt-0.5">
+                                      <span className="truncate font-medium">{issue.file}</span>
+                                      {issue.relatedFile && (
+                                        <span className="text-muted-foreground">↔ <span className="truncate">{issue.relatedFile}</span></span>
+                                      )}
+                                    </div>
+                                    <div className="text-muted-foreground mt-0.5">{issue.detail}</div>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                          </div>
+                        </>
+                      )}
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground text-center py-12">
+                      {t('kb.lintHint')}
+                    </div>
+                  )}
+                </div>
+              )}
+
+              {activeTab === 'report' && (
+                <div>
+                  {loadingAction === 'report' ? (
+                    <div className="flex items-center justify-center py-12">
+                      <Loader2 className="w-6 h-6 animate-spin text-primary" />
+                      <span className="ml-2 text-sm text-muted-foreground">{t('kb.reportGenerating')}</span>
+                    </div>
+                  ) : reportContent ? (
+                    <div className="rounded-lg border border-border max-h-[600px] overflow-y-auto">
+                      <ReportContent content={reportContent} />
+                    </div>
+                  ) : (
+                    <div className="text-sm text-muted-foreground text-center py-12">
+                      {t('kb.reportHint')}
+                    </div>
+                  )}
+                </div>
+              )}
+
             </div>
           )}
         </div>

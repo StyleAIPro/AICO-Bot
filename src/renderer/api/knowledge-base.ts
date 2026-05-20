@@ -90,6 +90,13 @@ export async function kbIngestAll(kbId: string): Promise<ApiResponse> {
   return { success: false, error: 'Not available in web mode' };
 }
 
+export async function kbIngestIncremental(kbId: string): Promise<ApiResponse> {
+  if (isElectron()) {
+    return window.aicoBot.kbIngestIncremental(kbId);
+  }
+  return { success: false, error: 'Not available in web mode' };
+}
+
 export async function kbCancelIngest(kbId: string): Promise<ApiResponse> {
   if (isElectron()) {
     return window.aicoBot.kbCancelIngest(kbId);
@@ -121,6 +128,20 @@ export async function kbQuery(kbId: string, question: string): Promise<ApiRespon
 export async function kbLint(kbId: string): Promise<ApiResponse> {
   if (isElectron()) {
     return window.aicoBot.kbLint(kbId);
+  }
+  return { success: false, error: 'Not available in web mode' };
+}
+
+export async function kbGenerateReport(kbId: string): Promise<ApiResponse> {
+  if (isElectron()) {
+    return window.aicoBot.kbGenerateReport(kbId);
+  }
+  return { success: false, error: 'Not available in web mode' };
+}
+
+export async function kbLoadReport(kbId: string): Promise<ApiResponse> {
+  if (isElectron()) {
+    return window.aicoBot.kbLoadReport(kbId);
   }
   return { success: false, error: 'Not available in web mode' };
 }
