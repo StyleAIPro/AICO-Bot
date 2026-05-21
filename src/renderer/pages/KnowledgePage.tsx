@@ -301,7 +301,12 @@ export function KnowledgePage() {
                 kbApi.kbReadPage(p.kbId, match.path),
                 kbApi.kbGetPageLinks(p.kbId, match.path),
               ]).then(([pageRes, linksRes]) => {
-                if (pageRes.success) setPageContent(pageRes.data as string);
+                if (pageRes.success) {
+                  setPageContent(pageRes.data as string);
+                  setTimeout(() => {
+                    document.getElementById(`wiki-page-${match.path}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                  }, 300);
+                }
                 if (linksRes.success) setPageLinks(linksRes.data as { outgoing: string[]; incoming: string[] });
               });
             });
@@ -931,7 +936,7 @@ export function KnowledgePage() {
                             </button>
                           )}
                           {expandedPage === page.path && (
-                            <div className="mx-3 mb-2 p-4 bg-muted/30 rounded-lg border border-border">
+                            <div id={`wiki-page-${page.path}`} className="mx-3 mb-2 p-4 bg-muted/30 rounded-lg border border-border">
                               {editingPagePath === page.path ? (
                                 <div className="space-y-3">
                                   <textarea
@@ -1177,12 +1182,38 @@ export function KnowledgePage() {
                           <span className="text-xs text-muted-foreground">{t('kb.citedPages')}:</span>
                           <div className="flex flex-wrap gap-1 mt-1">
                             {queryCited.map((page) => (
-                              <span
+                              <button
                                 key={page}
-                                className="text-xs px-2 py-0.5 bg-muted rounded text-muted-foreground"
+                                className="text-xs px-2 py-0.5 bg-primary/10 text-primary rounded hover:bg-primary/20 transition-colors cursor-pointer"
+                                onClick={() => {
+                                  const match = findMatchingPage(wikiPages, page);
+                                  if (!match) return;
+                                  setActiveTab('pages');
+                                  setExpandedPage(match.path);
+                                  setEditingPagePath(null);
+                                  setPageContent(t('kb.loading'));
+                                  setPageLinks({ outgoing: [], incoming: [] });
+                                  const kbId = currentKb!.id;
+                                  (async () => {
+                                    try {
+                                      const kbApi = await import('@/api/knowledge-base');
+                                      const [pageRes, linksRes] = await Promise.all([
+                                        kbApi.kbReadPage(kbId, match.path),
+                                        kbApi.kbGetPageLinks(kbId, match.path),
+                                      ]);
+                                      if (pageRes.success) {
+                                        setPageContent(pageRes.data as string);
+                                        setTimeout(() => {
+                                          document.getElementById(`wiki-page-${match.path}`)?.scrollIntoView({ behavior: 'smooth', block: 'center' });
+                                        }, 100);
+                                      }
+                                      if (linksRes.success) setPageLinks(linksRes.data as { outgoing: string[]; incoming: string[] });
+                                    } catch { /* ignore */ }
+                                  })();
+                                }}
                               >
                                 {page}
-                              </span>
+                              </button>
                             ))}
                           </div>
                         </div>

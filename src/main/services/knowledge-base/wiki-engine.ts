@@ -746,8 +746,48 @@ export class WikiEngine {
   // Query
   // ---------------------------------------------------------------------------
 
+  private async expandQueryTerms(question: string): Promise<string> {
+    try {
+      const response = await this.llm.chat([
+        {
+          role: 'system',
+          content: [
+            'Output a JSON array of semantically equivalent terms for the query. Rules:',
+            '1. Understand the FULL meaning — output complete phrases, NOT individual words.',
+            '2. BAD example: query="大模型训练" → ["model", "training"] (too generic, will match irrelevant pages)',
+            '3. GOOD example: query="大模型训练" → ["大模型训练", "large language model training", "LLM training", "大语言模型训练"]',
+            '4. BAD example: query="无人机" → ["machine", "fly"] (completely wrong)',
+            '5. GOOD example: query="无人机" → ["无人机", "uav", "unmanned aerial vehicle", "无人飞行器"]',
+            '6. Include the original query as the first element.',
+            '7. Output ONLY the JSON array, nothing else.',
+          ].join('\n'),
+        },
+        { role: 'user', content: question },
+      ]);
+      const cleaned = response.replace(/```json?\n?/g, '').replace(/```/g, '').trim();
+      const parsed = JSON.parse(cleaned);
+      if (Array.isArray(parsed) && parsed.length > 0 && parsed.every((t: unknown) => typeof t === 'string')) {
+        return parsed.map((t: string) => t.trim()).filter((t: string) => t.length > 0).join(' ');
+      }
+      return question;
+    } catch {
+      return question;
+    }
+  }
+
   async query(question: string): Promise<QueryResult> {
-    const relevantPages = this.findRelevantPages(question, 5);
+    const searchQuery = this.llm ? await this.expandQueryTerms(question) : question;
+    if (searchQuery !== question) {
+      console.log(`[WikiEngine] query expanded: "${question}" → "${searchQuery}"`);
+    }
+
+    let relevantPages = this.findRelevantPages(question, 10);
+
+    // If original query returns few results, expand with LLM synonyms and retry
+    if (this.llm && relevantPages.length < 3 && searchQuery !== question) {
+      relevantPages = this.findRelevantPages(searchQuery, 10);
+      console.log(`[WikiEngine] query retry: "${question}" → "${searchQuery}", ${relevantPages.length} pages`);
+    }
 
     if (relevantPages.length === 0) {
       return { answer: 'No relevant information found.', citedPages: [] };
@@ -761,9 +801,9 @@ export class WikiEngine {
       {
         role: 'system',
         content:
-          'Answer the question based ONLY on the provided wiki content. Cite pages using [[Page Title]] format.',
+          '你是一个知识库覆盖检查器。根据提供的wiki内容，只列出与查询相关的页面标题。\n\n规则：\n1. 用中文开头总结，如"根据提供的知识库内容，共有 N 个页面与 [主题] 相关"\n2. 然后用列表列出每个相关页面：* [[页面标题]] — 一句话描述该页面关于查询主题覆盖了什么\n3. 你必须用 [[ ]] 包裹每个页面标题\n4. 不要写详细解释，不要说"没有具体内容"，不要总结主题本身\n5. 如果没有相关页面，只说"未找到与 [主题] 相关的页面"',
       },
-      { role: 'user', content: `Question: ${question}\n\nWiki content:\n${context}` },
+      { role: 'user', content: `Query: ${question}\n\nWiki content:\n${context}` },
     ]);
 
     const citations = this.extractCitations(answer);
