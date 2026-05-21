@@ -11,6 +11,7 @@ import type {
 } from './types';
 import { KbLlmCaller } from './llm-caller';
 import { getAicoBotDir } from '../config.service';
+import { cut, with_dict } from 'jieba-wasm';
 import fs from 'node:fs';
 import path from 'node:path';
 
@@ -35,12 +36,23 @@ const CHINESE_STOP_CHARS = new Set(
     .split('')
 );
 
-// Chinese function-word bigrams — composed entirely of stop chars, no retrieval value
-const CHINESE_STOP_BIGRAMS = new Set([
-  '的是', '是了', '的了', '是在', '是在', '是有', '的也', '和也',
-  '也能', '也可', '是也', '是不', '不是', '的有', '和有', '与有',
-  '的了', '的是', '也能', '也可', '会也', '将会', '也会', '也有',
-  '在也', '在有', '是不是', '能不能', '会不会', '可不可以',
+// Chinese stop words for jieba segmentation — words with no retrieval value
+const CHINESE_STOP_WORDS = new Set([
+  ...CHINESE_STOP_CHARS,
+  '的', '了', '在', '是', '我', '有', '和', '就', '不', '人', '都',
+  '一', '一个', '上', '也', '很', '到', '说', '要', '去', '你', '会',
+  '着', '没有', '看', '好', '自己', '这', '他', '她', '我们', '他们',
+  '什么', '怎么', '为什么', '如何', '可以', '能够', '应该', '已经',
+  '因为', '所以', '如果', '但是', '而且', '或者', '虽然', '以及',
+  '进行', '使用', '具有', '通过', '需要', '包括', '其中', '关于',
+  '其他', '同时', '因此', '然后', '这个', '那个', '这些', '那些',
+  '一个', '一些', '一种', '一种', '方法', '问题', '情况', '结果',
+  '技术', '系统', '模型', '数据', '信息', '过程', '方式', '作用',
+  '主要', '相关', '不同', '目前', '当前', '基于', '采用', '实现',
+  '提出', '认为', '表示', '提供', '存在', '之间', '方面', '影响',
+  '分析', '研究', '设计', '开发', '优化', '提高', '降低', '增加',
+  '减少', '使得', '根据', '由于', '对于', '作为', '以', '及其',
+  '等', '等等', '之', '其', '此', '该', '某', '每', '各', '任何',
 ]);
 
 const WIKI_SUBDIRS = ['concepts', 'entities', 'summaries', 'conversations'] as const;
@@ -111,10 +123,60 @@ export class WikiEngine {
   // --- Synonym expansion cache ---
   private synonymCache: string[][] | null = null;
 
+  // --- Jieba custom dictionary ---
+  private customDictLoaded = false;
+
   constructor(kbPath: string, llm: KbLlmCaller) {
     this.kbPath = kbPath;
     this.llm = llm;
     this.titleCache = null;
+    this.loadCustomDictionary();
+  }
+
+  private loadCustomDictionary(): void {
+    if (this.customDictLoaded) return;
+    const dictPath = path.join(this.kbPath, 'custom-dict.txt');
+    if (fs.existsSync(dictPath)) {
+      try {
+        const content = fs.readFileSync(dictPath, 'utf-8');
+        with_dict(content);
+        console.log('[WikiEngine] Custom dictionary loaded');
+      } catch (err) {
+        console.error('[WikiEngine] Failed to load custom dictionary:', err);
+      }
+    }
+    this.customDictLoaded = true;
+  }
+
+  /**
+   * Build custom dictionary from all wiki page titles and tags.
+   * Call this after wiki compilation to update the domain-specific dictionary.
+   */
+  buildCustomDictionary(): void {
+    const wikiDir = path.join(this.kbPath, 'wiki');
+    if (!fs.existsSync(wikiDir)) return;
+
+    const termSet = new Set<string>();
+    const mdFiles = this.readdirRecursive(wikiDir, '.md');
+    for (const filePath of mdFiles) {
+      try {
+        const raw = fs.readFileSync(filePath, 'utf-8');
+        const { frontmatter } = this.parseFrontmatter(raw);
+        const title = (frontmatter['title'] as string) ?? '';
+        if (title && title.length >= 2) termSet.add(title);
+        const tags = (frontmatter['tags'] as string[]) ?? [];
+        for (const tag of tags) {
+          if (tag.length >= 2) termSet.add(tag);
+        }
+      } catch { /* skip unreadable files */ }
+    }
+
+    if (termSet.size === 0) return;
+
+    const lines = Array.from(termSet).map(term => `${term} 5 n`).join('\n');
+    const dictPath = path.join(this.kbPath, 'custom-dict.txt');
+    fs.writeFileSync(dictPath, lines, 'utf-8');
+    console.log(`[WikiEngine] Custom dictionary built: ${termSet.size} terms`);
   }
 
   clearGeneratedContent(): void {
@@ -793,7 +855,7 @@ export class WikiEngine {
       return { answer: 'No relevant information found.', citedPages: [] };
     }
 
-    const context = relevantPages
+    const pageList = relevantPages
       .map((p) => `## ${p.title}\n${p.content}`)
       .join('\n\n');
 
@@ -801,9 +863,9 @@ export class WikiEngine {
       {
         role: 'system',
         content:
-          '你是一个知识库覆盖检查器。根据提供的wiki内容，只列出与查询相关的页面标题。\n\n规则：\n1. 用中文开头总结，如"根据提供的知识库内容，共有 N 个页面与 [主题] 相关"\n2. 然后用列表列出每个相关页面：* [[页面标题]] — 一句话描述该页面关于查询主题覆盖了什么\n3. 你必须用 [[ ]] 包裹每个页面标题\n4. 不要写详细解释，不要说"没有具体内容"，不要总结主题本身\n5. 如果没有相关页面，只说"未找到与 [主题] 相关的页面"',
+          '你是一个知识库覆盖检查助手。我会给你若干个wiki页面和用户查询，你需要判断每个页面是否与查询相关，并为相关的页面生成一句话的覆盖描述。\n\n规则：\n1. 用中文开头："根据提供的知识库内容，共有 N 个页面与 [主题] 相关"\n2. 只列出与查询主题有关的页面，跳过明显无关的页面\n3. 每个页面格式：* [[页面标题]] — 一句话描述该页面关于查询主题覆盖了什么\n4. 用 [[ ]] 包裹页面标题\n5. 描述必须基于页面实际内容，不要编造\n6. 判断标准：页面内容必须与查询主题有实质性关联，不是仅仅提到了某个相同词汇',
       },
-      { role: 'user', content: `Query: ${question}\n\nWiki content:\n${context}` },
+      { role: 'user', content: `查询主题: ${question}\n\n页面列表:\n${pageList}` },
     ]);
 
     const citations = this.extractCitations(answer);
@@ -1013,31 +1075,26 @@ export class WikiEngine {
     const terms: string[] = [];
     const lower = text.toLowerCase();
 
+    // English words: unchanged
     const englishWords = lower.match(/[a-z0-9]{2,}/g) || [];
     terms.push(...englishWords.filter((w) => !STOP_WORDS.has(w)));
 
+    // Chinese segments: use jieba segmentation instead of bigram/trigram
     const chineseSegments = text.match(/[一-鿿]+/g) || [];
     for (const seg of chineseSegments) {
-      if (seg.length <= 4) {
-        terms.push(seg.toLowerCase());
-        continue;
-      }
-
-      for (let i = 0; i < seg.length - 1; i++) {
-        const bigram = seg.slice(i, i + 2).toLowerCase();
-        if (
-          CHINESE_STOP_BIGRAMS.has(bigram) ||
-          (CHINESE_STOP_CHARS.has(bigram[0]) && CHINESE_STOP_CHARS.has(bigram[1]))
-        ) {
-          continue;
+      try {
+        const words = cut(seg, true);
+        for (const w of words) {
+          const word = w.toLowerCase();
+          if (word.length < 2) continue; // skip single chars
+          if (CHINESE_STOP_WORDS.has(word)) continue;
+          if (CHINESE_STOP_CHARS.has(word)) continue;
+          terms.push(word);
         }
-        terms.push(bigram);
-      }
-
-      for (let i = 0; i <= seg.length - 3; i++) {
-        const trigram = seg.slice(i, i + 3).toLowerCase();
-        if (!CHINESE_STOP_CHARS.has(trigram[0]) && !CHINESE_STOP_CHARS.has(trigram[2])) {
-          terms.push(trigram);
+      } catch {
+        // Fallback: if jieba fails, keep the whole segment for short ones
+        if (seg.length >= 2 && seg.length <= 4) {
+          terms.push(seg.toLowerCase());
         }
       }
     }
@@ -1339,15 +1396,7 @@ export class WikiEngine {
 
   /**
    * Extract keywords from a query string, handling both English and Chinese text.
-   *
-   * Strategy:
-   * - English words: extract as-is (length >= 2, skip stop words)
-   * - Chinese short segments (<=4 chars): keep whole as a keyword
-   * - Chinese long segments (>4 chars):
-   *   1. Generate bigrams, filter out noise (stop-char pairs)
-   *   2. Generate trigrams as higher-precision alternatives
-   *   3. Deduplicate: if a trigram covers a bigram, drop the bigram
-   *      (e.g. "抗干扰" covers "抗干" at the same position → drop "抗干")
+   * Uses jieba segmentation for Chinese instead of bigram/trigram.
    */
   private extractKeywords(query: string): string[] {
     const keywords: string[] = [];
@@ -1357,55 +1406,24 @@ export class WikiEngine {
     const englishWords = lower.match(/[a-z0-9]{2,}/g) || [];
     keywords.push(...englishWords.filter((w) => !STOP_WORDS.has(w)));
 
-    // Extract Chinese character sequences
+    // Chinese segments: use jieba segmentation
     const chineseSegments = query.match(/[一-鿿]+/g) || [];
     for (const seg of chineseSegments) {
-      if (seg.length <= 4) {
-        keywords.push(seg.toLowerCase());
-        continue;
-      }
-
-      // Long segment: generate bigrams and trigrams
-      const bigrams: string[] = [];
-      const trigrams: string[] = [];
-
-      for (let i = 0; i < seg.length - 1; i++) {
-        const bigram = seg.slice(i, i + 2).toLowerCase();
-        // Filter: skip if both chars are stop chars, or the bigram is in stop list
-        if (
-          CHINESE_STOP_BIGRAMS.has(bigram) ||
-          (CHINESE_STOP_CHARS.has(bigram[0]) && CHINESE_STOP_CHARS.has(bigram[1]))
-        ) {
-          continue;
+      try {
+        const words = cut(seg, true);
+        for (const w of words) {
+          const word = w.toLowerCase();
+          if (word.length < 2) continue;
+          if (CHINESE_STOP_WORDS.has(word)) continue;
+          if (CHINESE_STOP_CHARS.has(word)) continue;
+          keywords.push(word);
         }
-        bigrams.push(bigram);
-      }
-
-      for (let i = 0; i <= seg.length - 3; i++) {
-        const trigram = seg.slice(i, i + 3).toLowerCase();
-        // Only keep trigrams that start and end with non-stop chars
-        if (!CHINESE_STOP_CHARS.has(trigram[0]) && !CHINESE_STOP_CHARS.has(trigram[2])) {
-          trigrams.push(trigram);
+      } catch {
+        // Fallback: keep short segments as-is
+        if (seg.length >= 2 && seg.length <= 4) {
+          keywords.push(seg.toLowerCase());
         }
       }
-
-      // Deduplicate: mark bigrams that are covered by a trigram
-      const coveredByTrigram = new Set<number>();
-      for (const tri of trigrams) {
-        const triStart = seg.toLowerCase().indexOf(tri);
-        if (triStart === -1) continue;
-        // This trigram covers bigrams at position triStart and triStart+1
-        for (let offset = 0; offset <= 1; offset++) {
-          coveredByTrigram.add(triStart + offset);
-        }
-      }
-
-      for (let i = 0; i < bigrams.length; i++) {
-        if (!coveredByTrigram.has(i)) {
-          keywords.push(bigrams[i]);
-        }
-      }
-      keywords.push(...trigrams);
     }
 
     return keywords;
@@ -1511,6 +1529,9 @@ export class WikiEngine {
   crossLinkAllPages(): void {
     const wikiDir = path.join(this.kbPath, 'wiki');
     if (!fs.existsSync(wikiDir)) return;
+
+    // Build custom dictionary from wiki titles/tags for jieba segmentation
+    this.buildCustomDictionary();
 
     const mdFiles = this.readdirRecursive(wikiDir, '.md');
     // Build title → { filePath, title } map

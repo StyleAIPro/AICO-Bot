@@ -77,8 +77,8 @@ export default defineConfig({
           }
         }
       },
-      // Don't bundle electron
-      external: ['electron']
+      // Don't bundle electron and native/wasm packages
+      external: ['electron', 'jieba-wasm']
     }
   },
   server: {
