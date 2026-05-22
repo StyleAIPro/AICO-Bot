@@ -3,6 +3,8 @@
 import { config as configDotenv } from 'dotenv'
 import { RemoteAgentServer } from './server.js'
 import type { RemoteServerConfig } from './types.js'
+import { setOnLogCallback } from './openai-compat-router/server/index.js'
+import { log, SCOPE, setLogDir, cleanupOldLogs } from './logger.js'
 import * as path from 'path'
 import * as fs from 'fs'
 
@@ -32,7 +34,7 @@ function loadConfig(): RemoteServerConfig {
       config.tokensJsonPath = tokensJsonPath
     }
   } catch (error) {
-    console.warn('[RemoteAgentProxy] Failed to load tokens.json:', error)
+    log.warn(SCOPE.SERVER, `Failed to load tokens.json: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   // Support comma-separated tokens env var
@@ -41,14 +43,13 @@ function loadConfig(): RemoteServerConfig {
     config.authTokens = [...(config.authTokens || []), ...extraTokens]
   }
 
-  console.log('[RemoteAgentProxy] Configuration loaded:')
-  console.log(`  - Port: ${config.port}`)
-  console.log(`  - Auth Tokens: ${config.authTokens?.length || 0} additional${config.authToken ? ' + 1 primary' : ''} (open access if 0)`)
-  console.log(`  - Deploy Dir: ${deployDir}`)
-  console.log(`  - Tokens file: ${tokensJsonPath}`)
-  console.log(`  - Work Dir: ${config.workDir || 'default'}`)
-  console.log(`  - Claude Code Path: ${config.pathToClaudeCodeExecutable || 'not set (SDK mode)'}`)
-  console.log(`  - Model credentials: per-request only (from AICO-Bot client)`)
+  log.info(SCOPE.SERVER, 'Configuration loaded:')
+  log.info(SCOPE.SERVER, `  Port: ${config.port}`)
+  log.info(SCOPE.SERVER, `  Auth Tokens: ${config.authTokens?.length || 0} additional${config.authToken ? ' + 1 primary' : ''} (open access if 0)`)
+  log.info(SCOPE.SERVER, `  Deploy Dir: ${deployDir}`)
+  log.info(SCOPE.SERVER, `  Tokens file: ${tokensJsonPath}`)
+  log.info(SCOPE.SERVER, `  Work Dir: ${config.workDir || 'default'}`)
+  log.info(SCOPE.SERVER, `  Claude Code Path: ${config.pathToClaudeCodeExecutable || 'not set (SDK mode)'}`)
 
   return config
 }
@@ -77,29 +78,44 @@ function migrateClaudeSkills(): void {
         const destPath = path.join(agentsSkillsDir, entry.name)
         if (!fs.existsSync(destPath)) {
           fs.cpSync(srcPath, destPath, { recursive: true })
-          console.log(`[Migration] Migrated Claude skill: ${entry.name}`)
+          log.info(SCOPE.SERVER, `Migrated Claude skill: ${entry.name}`)
         }
       }
     }
   } catch (error) {
-    console.error('[Migration] Failed to migrate Claude skills:', error)
+    log.error(SCOPE.SERVER, `Failed to migrate Claude skills: ${error instanceof Error ? error.message : String(error)}`)
   }
 }
 
 function main(): void {
   migrateClaudeSkills()
   const config = loadConfig()
+
+  // Initialize file logging
+  setLogDir(path.join(deployDir, 'logs'))
+  cleanupOldLogs()
+
   const server = new RemoteAgentServer(config)
+
+  // Forward OpenAI Compat Router logs to all connected WebSocket clients AND file
+  setOnLogCallback((entry) => {
+    server.forwardLogToClients(entry)
+    const scope = entry.source === 'router' ? 'Router' : 'RequestHandler'
+    const msg = `[${entry.source}] ${entry.message}`
+    if (entry.level === 'error') log.error(scope, msg)
+    else if (entry.level === 'warn') log.warn(scope, msg)
+    else log.info(scope, msg)
+  })
 
   // Handle graceful shutdown
   process.on('SIGINT', () => {
-    console.log('\n[RemoteAgentProxy] Shutting down server...')
+    log.info(SCOPE.SERVER, 'Shutting down server...')
     server.close()
     process.exit(0)
   })
 
   process.on('SIGTERM', () => {
-    console.log('\n[RemoteAgentProxy] Shutting down server...')
+    log.info(SCOPE.SERVER, 'Shutting down server...')
     server.close()
     process.exit(0)
   })

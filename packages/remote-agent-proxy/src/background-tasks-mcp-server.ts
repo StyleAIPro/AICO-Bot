@@ -14,6 +14,7 @@ import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js'
 import { spawn, type ChildProcess } from 'child_process'
 import { z } from 'zod'
 import * as crypto from 'crypto'
+import { log, SCOPE } from './logger.js'
 
 // ============================================
 // Types
@@ -252,6 +253,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error('[background-tasks-mcp] Fatal error:', err)
+  log.error(SCOPE.SERVER, `background-tasks-mcp fatal error: ${err instanceof Error ? err.message : String(err)}`)
   process.exit(1)
 })

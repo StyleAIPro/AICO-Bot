@@ -12,6 +12,7 @@ import type { Response as ExpressResponse } from 'express'
 import { SSEWriter } from './sse-writer'
 import type { AnthropicStopReason, StreamToolCallState } from '../types'
 import { safeJsonParse } from '../utils'
+import { log, SCOPE } from '../../logger.js'
 
 // ============================================================================
 // Stream State
@@ -141,10 +142,10 @@ export abstract class BaseStreamHandler {
 
     // Debug: print accumulated content
     if (this.state.accumulatedThinking) {
-      console.log(`[StreamHandler] Accumulated thinking:\n${this.state.accumulatedThinking}`)
+      log.info(SCOPE.SERVER, `Accumulated thinking:\n${this.state.accumulatedThinking}`)
     }
     if (this.state.accumulatedText) {
-      console.log(`[StreamHandler] Accumulated text:\n${this.state.accumulatedText}`)
+      log.info(SCOPE.SERVER, `Accumulated text:\n${this.state.accumulatedText}`)
     }
 
     // Close any open block
@@ -320,7 +321,7 @@ export abstract class BaseStreamHandler {
         this.writer.writeInputJsonDelta(blockIndex, escaped)
       } catch (e) {
         if (this.debug) {
-          console.error('[BaseStreamHandler] Failed to write tool input delta:', e)
+          log.error(SCOPE.SERVER, `Failed to write tool input delta: ${e}`)
         }
       }
     }

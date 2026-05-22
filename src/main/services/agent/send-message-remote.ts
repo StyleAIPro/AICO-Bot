@@ -44,7 +44,6 @@ import {
 import { AicoBotMcpBridge } from '../remote/ws/aico-bot-mcp-bridge';
 import { terminalGateway } from '../terminal/terminal-gateway';
 import { SkillManager } from '../skill/skill-manager';
-import { evaluate as evaluateTaskOutcome } from '../task-outcome';
 
 const log = createLogger('agent:remote');
 
@@ -707,6 +706,23 @@ export async function executeRemoteMessage(
       }
     });
 
+    // Remote proxy log forwarding — record in local logs
+    addHandler('log', (data) => {
+      const entry = data.data;
+      if (!entry) return;
+      const level = entry.level || 'info';
+      const source = entry.source || 'unknown';
+      const message = entry.message || '';
+      const prefix = `[remote-log] [${source}]`;
+      if (level === 'error') {
+        log.error(`${prefix} ${message}`);
+      } else if (level === 'warn') {
+        log.warn(`${prefix} ${message}`);
+      } else {
+        log.info(`${prefix} ${message}`);
+      }
+    });
+
     // Idle timeout — forward to renderer for user decision
     addHandler('idle:timeout', (data) => {
       if (data.sessionId === effectiveSessionId) {
@@ -929,7 +945,7 @@ export async function executeRemoteMessage(
     });
 
     // Extract file changes summary for immediate display (aligned with local conversation)
-    let metadata: { fileChanges?: FileChangesSummary; taskOutcome?: import('@shared/types/task-outcome').TaskOutcome } | undefined;
+    let metadata: { fileChanges?: FileChangesSummary } | undefined;
     if (thoughts.length > 0) {
       try {
         const fileChangesSummary = extractFileChangesSummaryFromThoughts(thoughts);
@@ -942,36 +958,6 @@ export async function executeRemoteMessage(
       } catch (error) {
         log.error(`Failed to extract file changes:`, error);
       }
-    }
-
-    // Task Outcome: evaluate success/failure for remote execution
-    try {
-      const remoteStreamResult = {
-        finalContent: streamingContent || response.content || '',
-        thoughts,
-        tokenUsage: response.tokenUsage || null,
-        isInterrupted: false,
-        wasAborted: false,
-        hasErrorThought: false,
-        errorThought: undefined,
-        reachedMaxTurns: false,
-        hasPendingInjection: false,
-        needsAuthRetry: false,
-      };
-      const taskOutcome = evaluateTaskOutcome({
-        streamResult: remoteStreamResult,
-        userMessage: message,
-        spaceId,
-        conversationId,
-        t0: Date.now(), // remote doesn't track t0, use approximate
-      });
-      if (taskOutcome) {
-        if (!metadata) metadata = {};
-        metadata.taskOutcome = taskOutcome;
-        log.info(`Task outcome: ${taskOutcome.verdict} (${taskOutcome.source}, confidence=${taskOutcome.confidence})`);
-      }
-    } catch (error) {
-      log.warn(`Task outcome evaluation failed:`, error);
     }
 
     // Update the assistant message with the response

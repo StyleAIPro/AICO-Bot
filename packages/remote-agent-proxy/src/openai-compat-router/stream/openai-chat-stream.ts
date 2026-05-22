@@ -12,6 +12,7 @@ import {
 } from './base-stream-handler'
 import { safeJsonParse } from '../utils'
 import type { OpenAIChatChunk, OpenAIChatAnnotation, AnthropicStopReason } from '../types'
+import { log, SCOPE } from '../../logger.js'
 
 export class OpenAIChatStreamHandler extends BaseStreamHandler {
   // Track <think> tag state for providers that use XML-style thinking
@@ -52,7 +53,7 @@ export class OpenAIChatStreamHandler extends BaseStreamHandler {
           if (!data) continue
 
           if (this.debug) {
-            console.log('[OpenAIChatStream] Received:', data.slice(0, 200))
+            log.info(SCOPE.SERVER, `OpenAI Chat stream received: ${data.slice(0, 200)}`)
           }
 
           const chunkJson = safeJsonParse<OpenAIChatChunk>(data)
@@ -63,7 +64,7 @@ export class OpenAIChatStreamHandler extends BaseStreamHandler {
       }
     } catch (error: any) {
       if (!this.isFinished && this.debug) {
-        console.error('[OpenAIChatStream] Error:', error)
+        log.error(SCOPE.SERVER, `OpenAI Chat stream error: ${error}`)
       }
     } finally {
       this.finishMessage()

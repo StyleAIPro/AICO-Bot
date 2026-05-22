@@ -18,6 +18,9 @@ import type net from 'node:net';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { getEffectiveProxyUrl } from './proxy-agent';
+import { createLogger } from '../log';
+
+const logger = createLogger('Proxy');
 
 /**
  * Custom error for proxy CONNECT handshake failures.
@@ -247,6 +250,7 @@ function fetchViaProxy(
   // If this proxy is known to require SSPI auth, skip CONNECT and use curl directly
   const proxyOrigin = extractProxyOrigin(proxyUrl);
   if (negotiateProxyCache.has(proxyOrigin)) {
+    logger.info(`Proxy ${proxyOrigin} requires SSPI auth, using curl directly`);
     return fetchViaCurl(targetUrl, init, proxyUrl, 'negotiate', timeoutMs);
   }
 
@@ -308,6 +312,7 @@ function fetchViaProxy(
           const authScheme = detectProxyAuthChallenge(res.headers);
           if (authScheme) {
             negotiateProxyCache.add(proxyOrigin);
+            logger.info(`Proxy 407 with ${authScheme} auth, falling back to curl`);
             // Drain the 407 response body, then delegate to curl
             res.on('data', () => {});
             res.on('end', () => {
@@ -321,6 +326,7 @@ function fetchViaProxy(
 
         let body = '';
         res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+        logger.warn(`Proxy CONNECT failed (${res.statusCode}) to ${target.hostname}`);
         res.on('end', () => {
           reject(
             new ProxyConnectError(
@@ -335,6 +341,7 @@ function fetchViaProxy(
       }
 
       clearTimeout(connectTimer);
+      logger.info(`CONNECT tunnel established to ${target.hostname} via ${proxy.hostname}`);
 
       if (isHttps) {
         // Merge any early data from the tunnel into the TLS socket
@@ -495,9 +502,17 @@ export async function proxyFetch(
 ): Promise<Response> {
   const timeout = timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const effectiveProxyUrl = forceNoProxy ? undefined : getEffectiveProxyUrl();
+  const method = init?.method || 'GET';
+  const startTime = Date.now();
+
+  logger.info(
+    `${method} ${url} via=${effectiveProxyUrl ? `proxy(${effectiveProxyUrl})` : 'direct'} timeout=${timeout}ms`,
+  );
 
   if (effectiveProxyUrl) {
-    return fetchViaProxy(url, init, effectiveProxyUrl, timeout);
+    const response = await fetchViaProxy(url, init, effectiveProxyUrl, timeout);
+    logger.info(`Response ${response.status} (${((Date.now() - startTime) / 1000).toFixed(1)}s)`);
+    return response;
   }
 
   // No proxy — use native fetch with timeout
@@ -536,6 +551,7 @@ export async function proxyFetch(
       ...init,
       signal: controller.signal,
     });
+    logger.info(`Response ${response.status} (${((Date.now() - startTime) / 1000).toFixed(1)}s)`);
     return response;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'AbortError') {
