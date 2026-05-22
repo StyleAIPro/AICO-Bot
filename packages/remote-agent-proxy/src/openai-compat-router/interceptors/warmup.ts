@@ -7,6 +7,7 @@
 
 import type { AnthropicRequest } from '../types'
 import type { RequestInterceptor, InterceptorContext, InterceptorResult } from './types'
+import { log, SCOPE } from '../../logger.js'
 
 /**
  * Extract user message text from Anthropic message content formats
@@ -110,7 +111,7 @@ export const warmupInterceptor: RequestInterceptor = {
   },
 
   intercept(_request: AnthropicRequest, context: InterceptorContext): InterceptorResult {
-    console.log('[Interceptor:warmup] Intercepting Warmup request, returning mock response...')
+    log.info(SCOPE.SERVER, 'Intercepting Warmup request, returning mock response')
     sendMockResponse(context)
     return { handled: true, responded: true }
   }

@@ -97,7 +97,8 @@ export interface ServerMessage {
          'ask:question' |  // AskUserQuestion forwarding to client
          'permission:request' |  // Destructive command permission request to client
          'auth_retry' |  // Auth retry notification (401 auto-recovery)
-         'stream:alive'  // Stream alive heartbeat
+         'stream:alive' |  // Stream alive heartbeat
+         'log'  // Remote log forwarding to local client
   sessionId?: string
   generationId?: string
   data?: any

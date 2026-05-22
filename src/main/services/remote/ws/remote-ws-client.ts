@@ -448,6 +448,10 @@ export class RemoteWsClient extends EventEmitter {
           this.emit('permission:request', { sessionId: message.sessionId, data: message.data });
           break;
 
+        case 'log':
+          this.emit('log', { data: message.data });
+          break;
+
         default:
           log.warn(`[${this.config.serverId}] Unknown message type:`, message.type);
       }

@@ -5,6 +5,7 @@
  */
 
 import type { Response as ExpressResponse } from 'express'
+import { log, SCOPE } from '../../logger.js'
 import type {
   AnthropicStreamEvent,
   AnthropicMessageStartEvent,
@@ -51,7 +52,7 @@ export class SSEWriter {
       this.res.write(`event: ${event}\ndata: ${jsonData}\n\n`)
 
       if (this.debug) {
-        console.log(`[SSEWriter] Send: ${event}`, jsonData.slice(0, 200))
+        log.info(SCOPE.SERVER, `SSE Send: ${event} ${jsonData.slice(0, 200)}`)
       }
 
       return true
@@ -59,7 +60,7 @@ export class SSEWriter {
       if (e instanceof TypeError && String((e as Error).message).includes('Controller is already closed')) {
         this.closed = true
       } else if (this.debug) {
-        console.error('[SSEWriter] Error writing event:', e)
+        log.error(SCOPE.SERVER, `SSE error writing event: ${e}`)
       }
       return false
     }

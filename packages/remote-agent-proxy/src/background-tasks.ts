@@ -8,6 +8,7 @@
 import { spawn, ChildProcess } from 'child_process'
 import { EventEmitter } from 'events'
 import * as crypto from 'crypto'
+import { log, SCOPE } from './logger.js'
 
 // ============================================
 // Types
@@ -111,7 +112,7 @@ export class BackgroundTaskManager extends EventEmitter {
     // Start periodic output sampling
     this.startSample(id)
 
-    console.log(`[BackgroundTasks] Spawned task ${id}: "${command}" (pid=${child.pid})`)
+    log.info(SCOPE.SERVER, `Spawned task ${id}: "${command}" (pid=${child.pid})`)
     this.emit('update', { type: 'created', task } as TaskEvent)
 
     return task
