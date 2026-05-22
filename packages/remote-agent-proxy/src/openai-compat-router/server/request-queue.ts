@@ -13,9 +13,12 @@ interface Waiter<T> {
   enqueuedAt: number
 }
 
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type AnyWaiter = Waiter<any>
+
 interface QueueState {
   running: number
-  waiting: Array<Waiter<unknown>>
+  waiting: Array<AnyWaiter>
 }
 
 const requestQueues = new Map<string, QueueState>()
