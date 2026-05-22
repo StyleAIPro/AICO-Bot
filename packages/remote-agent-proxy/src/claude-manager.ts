@@ -788,6 +788,8 @@ export class ClaudeManager {
     // Known Anthropic URLs (including Dashscope Claude-as-a-Service /apps/anthropic)
     if (baseUrl.includes('api.anthropic.com')) return 'anthropic'
     if (baseUrl.includes('/anthropic')) return 'anthropic'
+    // Anthropic standard endpoint: /v1/messages or /messages
+    if (baseUrl.endsWith('/v1/messages') || baseUrl.endsWith('/messages')) return 'anthropic'
     // Everything else is treated as OpenAI-compatible
     return 'openai_compat'
   }
