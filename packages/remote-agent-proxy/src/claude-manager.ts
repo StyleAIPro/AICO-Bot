@@ -1018,6 +1018,7 @@ export class ClaudeManager {
 
     // ── Route through OpenAI Compat Router for non-Anthropic backends ──
     const backendType = this.detectBackendType(effectiveBaseUrl)
+    console.log(`[ClaudeManager] detectBackendType: url="${effectiveBaseUrl}" -> ${backendType}`)
 
     if (backendType === 'openai_compat') {
       // Start local protocol translator (lazy, once per process lifetime)
