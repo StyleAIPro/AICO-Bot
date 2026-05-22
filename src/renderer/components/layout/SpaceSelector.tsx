@@ -115,8 +115,8 @@ export function SpaceSelector() {
         if (result.success && Array.isArray(result.data)) {
           setRemoteServers(result.data);
         }
-      } catch (error) {
-        console.error('[SpaceSelector] Failed to load remote servers:', error);
+      } catch {
+        // 远程服务器加载失败是预期行为（本地/内网环境），静默处理
       }
     };
     loadServers();
@@ -202,12 +202,6 @@ export function SpaceSelector() {
     currentSpace?.claudeSource === 'remote' && currentSpace.remoteServerId
       ? getRemoteServerName(currentSpace.remoteServerId)
       : null;
-
-  // Debug: Log when spaces are loaded
-  console.log(
-    '[SpaceSelector] Loaded spaces:',
-    allSpaces.map((s) => ({ id: s.id, name: s.name, claudeSource: s.claudeSource })),
-  );
 
   return (
     <div className="relative" ref={dropdownRef}>

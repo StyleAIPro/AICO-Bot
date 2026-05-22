@@ -12,6 +12,7 @@ import * as fs from 'fs'
 import path from 'path'
 import os from 'os'
 import { fileURLToPath } from 'url'
+import { log, logConversation, shortId, SCOPE } from './logger.js'
 import type { AicoBotMcpToolDef } from './types.js'
 
 // ============================================
@@ -83,7 +84,7 @@ function reconstructZod(val: any): any {
             return z.object(shape)
           }
         }
-        console.warn(`[ZodReconstruct] ZodObject shape lost during serialization, using z.record(z.string(), z.any())`)
+        log.warn(SCOPE.CLAUDE_MGR, `ZodObject shape lost during serialization, using z.record(z.string(), z.any())`)
         return z.record(z.string(), z.any())
       }
       case 'ZodEnum':
@@ -107,7 +108,7 @@ function reconstructZod(val: any): any {
       case 'ZodBigInt':
         return z.bigint()
       default:
-        console.warn(`[ZodReconstruct] Unknown typeName: ${typeName}, falling back to z.any()`)
+        log.warn(SCOPE.CLAUDE_MGR, `Unknown Zod typeName: ${typeName}, falling back to z.any()`)
         return z.any()
     }
   }
@@ -452,7 +453,7 @@ function buildSystemPrompt(workDir: string, modelInfo?: string): string {
 
   try {
     if (fs.existsSync(systemPromptPath)) {
-      console.log('[ClaudeManager] Loading system prompt from:', systemPromptPath)
+      log.info(SCOPE.CLAUDE_MGR, `Loading system prompt from: ${systemPromptPath}`)
       let systemPrompt = fs.readFileSync(systemPromptPath, 'utf-8')
 
       // Replace dynamic placeholders (uppercase to match system-prompt.ts template)
@@ -468,10 +469,10 @@ function buildSystemPrompt(workDir: string, modelInfo?: string): string {
 
       return systemPrompt
     } else {
-      console.log('[ClaudeManager] System prompt file not found, using fallback')
+      log.info(SCOPE.CLAUDE_MGR, 'System prompt file not found, using fallback')
     }
   } catch (error) {
-    console.error('[ClaudeManager] Failed to load system prompt:', error)
+    log.error(SCOPE.CLAUDE_MGR, `Failed to load system prompt: ${error instanceof Error ? error.message : String(error)}`)
   }
 
   // Fallback to simplified prompt (should not happen if sync worked)
@@ -551,7 +552,7 @@ function isSessionTransportReady(session: SDKSession): boolean {
 
     return true
   } catch (e) {
-    console.error('[ClaudeManager] Error checking session transport state:', e)
+    log.error(SCOPE.CLAUDE_MGR, `Error checking session transport state: ${e instanceof Error ? e.message : String(e)}`)
     return false
   }
 }
@@ -576,22 +577,22 @@ function registerProcessExitListener(
     const transport = (session as any).query?.transport
 
     if (!transport) {
-      console.warn(`[ClaudeManager][${conversationId}] Cannot register exit listener: no transport`)
+      log.warn(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Cannot register exit listener: no transport`)
       return
     }
 
     if (typeof transport.onExit === 'function') {
       transport.onExit((error: Error | undefined) => {
         const errorMsg = error ? `: ${error.message}` : ''
-        console.log(`[ClaudeManager][${conversationId}] Process exited${errorMsg}`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Process exited${errorMsg}`)
         onExit(conversationId)
       })
-      console.log(`[ClaudeManager][${conversationId}] Process exit listener registered`)
+      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Process exit listener registered`)
     } else {
-      console.warn(`[ClaudeManager][${conversationId}] SDK transport.onExit not available`)
+      log.warn(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] SDK transport.onExit not available`)
     }
   } catch (e) {
-    console.error(`[ClaudeManager][${conversationId}] Failed to register exit listener:`, e)
+    log.error(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Failed to register exit listener: ${e instanceof Error ? e.message : String(e)}`)
   }
 }
 
@@ -645,7 +646,7 @@ function waitForProcessExit(session: SDKSession, timeoutMs = 10000): Promise<voi
       if (!settled) {
         settled = true
         clearInterval(poll)
-        console.warn('[ClaudeManager] waitForProcessExit timed out, proceeding anyway')
+        log.warn(SCOPE.CLAUDE_MGR, 'waitForProcessExit timed out, proceeding anyway')
         resolve()
       }
     }, timeoutMs)
@@ -769,7 +770,7 @@ export class ClaudeManager {
     this.model = model
     this.contextWindow = contextWindow
     this.configGeneration++
-    console.log(`[ClaudeManager] Config updated, generation: ${this.configGeneration}`)
+    log.info(SCOPE.CLAUDE_MGR, `Config updated, generation: ${this.configGeneration}`)
   }
 
   // ============================================================================
@@ -806,7 +807,7 @@ export class ClaudeManager {
     if (this.routerInfo) return this.routerInfo
     const { ensureOpenAICompatRouter } = await import('./openai-compat-router/server/index.js')
     this.routerInfo = await ensureOpenAICompatRouter({ debug: false })
-    console.log(`[ClaudeManager] OpenAI Compat Router started on ${this.routerInfo!.baseUrl}`)
+    log.info(SCOPE.CLAUDE_MGR, `OpenAI Compat Router started on ${this.routerInfo!.baseUrl}`)
     return this.routerInfo!
   }
 
@@ -925,7 +926,7 @@ export class ClaudeManager {
         async (args: any) => {
           try {
             const callId = generateCallId()
-            console.log(`[AicoBotMcpBridge] Tool called: ${def.serverName}:${def.name}`)
+            log.debug(SCOPE.CLAUDE_MGR, `MCP bridge tool called: ${def.serverName}:${def.name}`)
             const result = await executeTool(callId, def.name, args)
             // Handle result shape — could be CallToolResult or raw string
             if (typeof result === 'string') {
@@ -1056,7 +1057,8 @@ export class ClaudeManager {
       // which then converts to OpenAI format and replaces the model name with the real one.
       options.model = 'claude-sonnet-4-6'
 
-      console.log(`[ClaudeManager] Routing via OpenAI Compat Router: ${router.baseUrl} -> ${normalizedUrl} (apiType=${apiType}, model=${effectiveModel})`)
+      log.info(SCOPE.CLAUDE_MGR, `Routing via OpenAI Compat Router: ${router.baseUrl} -> ${normalizedUrl} (apiType=${apiType}, model=${effectiveModel})`)
+      logConversation(`RequestHandler: OpenAI compat baseUrl=${router.baseUrl} target=${normalizedUrl} apiType=${apiType} model=${effectiveModel} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
     } else {
       // Native Anthropic / Anthropic-compatible proxy — direct passthrough
       // CRITICAL: Must set BOTH ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN.
@@ -1077,6 +1079,7 @@ export class ClaudeManager {
         options.env.ANTHROPIC_BASE_URL = baseUrl
       }
       // Use the real model name — /anthropic endpoints (DashScope, Zhipu, etc.)
+      logConversation(`RequestHandler: Anthropic passthrough baseUrl=${effectiveBaseUrl || 'default'} model=${effectiveModel || 'default'} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
       // accept their own model names, not substituted Claude model names.
     }
 
@@ -1155,7 +1158,7 @@ export class ClaudeManager {
           }
         }
       } catch (err) {
-        console.warn('[ClaudeManager] Failed to read source dir:', sourceDir, err)
+        log.warn(SCOPE.CLAUDE_MGR, `Failed to read source dir: ${sourceDir} — ${err instanceof Error ? err.message : String(err)}`)
       }
     }
 
@@ -1167,7 +1170,7 @@ export class ClaudeManager {
         if (!candidates.has(entry.name)) {
           try {
             fs.unlinkSync(path.join(configSkillsDir, entry.name))
-            console.log(`[ClaudeManager] Removed stale skill link: ${entry.name}`)
+            log.debug(SCOPE.CLAUDE_MGR, `Removed stale skill link: ${entry.name}`)
           } catch {
             // ignore
           }
@@ -1188,7 +1191,7 @@ export class ClaudeManager {
       try {
         fs.symlinkSync(sourcePath, targetPath, 'dir')
       } catch (err) {
-        console.warn(`[ClaudeManager] Failed to link skill ${name}:`, err)
+        log.warn(SCOPE.CLAUDE_MGR, `Failed to link skill ${name}: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
 
@@ -1202,7 +1205,7 @@ export class ClaudeManager {
       try {
         fs.symlinkSync(configSkillsDir, dotClaudeSkillsDir, 'dir')
       } catch (err) {
-        console.warn('[ClaudeManager] Failed to create .claude/skills symlink:', err)
+        log.warn(SCOPE.CLAUDE_MGR, `Failed to create .claude/skills symlink: ${err instanceof Error ? err.message : String(err)}`)
       }
     }
 
@@ -1225,7 +1228,7 @@ export class ClaudeManager {
     const info = this.sessions.get(conversationId)
     if (!info) return
 
-    console.log(`[ClaudeManager][${conversationId}] Cleaning up session: ${reason}`)
+    log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Cleaning up session: ${reason}`)
 
     try {
       info.session.close()
@@ -1233,7 +1236,7 @@ export class ClaudeManager {
       // Ignore EPIPE errors (common on Windows when process already exited)
       // Aligned with local session-manager.ts
       if (e?.code === 'EPIPE' || e?.message?.includes('EPIPE')) {
-        console.log(`[ClaudeManager][${conversationId}] Session close: EPIPE (process already exited)`)
+        log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session close: EPIPE (process already exited)`)
       }
     }
 
@@ -1322,20 +1325,20 @@ export class ClaudeManager {
     if (existing) {
       // CRITICAL: Check if workDir changed - if so, need to recreate session
       if (workDirChanged) {
-        console.log(`[ClaudeManager][${conversationId}] WorkDir changed: ${existing.config.workDir} -> ${effectiveWorkDir}, recreating (skipping resume)...`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] WorkDir changed: ${existing.config.workDir} -> ${effectiveWorkDir}, recreating (skipping resume)...`)
         this.cleanupSession(conversationId, 'workDir changed')
         // Fall through to create new session (without resume)
       } else
       // CRITICAL: Check if process is still alive before reusing
       if (!isSessionTransportReady(existing.session)) {
-        console.log(`[ClaudeManager][${conversationId}] Session transport not ready, recreating...`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session transport not ready, recreating...`)
         this.cleanupSession(conversationId, 'process not ready')
         // Fall through to create new session
       } else if ((existing.session as any).closed) {
         // CRITICAL: Check SDK's closed flag — the session may have been closed by
         // abortController.abort() or SDK internal error without calling cleanupSession(),
         // leaving a stale entry in this.sessions with closed=true.
-        console.log(`[ClaudeManager][${conversationId}] Session closed flag set, recreating...`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session closed flag set, recreating...`)
         this.cleanupSession(conversationId, 'session closed')
         // Fall through to create new session (without resume — closed sessions can't resume)
       } else if (existing.interrupted) {
@@ -1345,7 +1348,7 @@ export class ClaudeManager {
         // new message, but the SDK emits the stale tail of the old response first,
         // causing the client to receive wrong content.
         // resumeSessionId (from disk) restores conversation context in the new session.
-        console.log(`[ClaudeManager][${conversationId}] Session interrupted, rebuilding (reuse is unsafe — stale response risk)`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session interrupted, rebuilding (reuse is unsafe — stale response risk)`)
         this.cleanupSession(conversationId, 'session interrupted - rebuilding')
         // Fall through to create new session
       } else if (effectiveResumeId) {
@@ -1355,17 +1358,17 @@ export class ClaudeManager {
         // process exit wait + MCP initialization + new session creation overhead.
         //
         // If reuse fails (SDK throws "process aborted" or similar), fall back to rebuild.
-        console.log(`[ClaudeManager][${conversationId}] Resume requested, attempting session reuse...`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Resume requested, attempting session reuse...`)
 
         // Check if canUseTool needs injection — SDK V2 Session doesn't support
         // dynamically updating canUseTool after creation.
         if (canUseTool) {
           if (this.activeSessions.has(conversationId)) {
-            console.log(`[ClaudeManager][${conversationId}] Resume: canUseTool provided but request in flight, deferring rebuild`)
+            log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Resume: canUseTool provided but request in flight, deferring rebuild`)
             existing.lastUsedAt = Date.now()
             return existing.session
           }
-          console.log(`[ClaudeManager][${conversationId}] Resume: canUseTool provided, rebuilding session to inject permission callback`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Resume: canUseTool provided, rebuilding session to inject permission callback`)
           this.cleanupSession(conversationId, 'canUseTool injection needed (resume)')
           // Fall through to create new session (without resume — old session is destroyed)
         } else {
@@ -1386,7 +1389,7 @@ export class ClaudeManager {
             existing.mcpToolSignature = mcpToolSignature
           }
 
-          console.log(`[ClaudeManager][${conversationId}] Reusing existing V2 session for resume (will rebuild on failure)`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Reusing existing V2 session for resume (will rebuild on failure)`)
           return existing.session
         }
       } else {
@@ -1408,21 +1411,21 @@ export class ClaudeManager {
 
         // Debug: Log config comparison
         if (needsRebuild || configChanged) {
-          console.log(`[ClaudeManager][${conversationId}] Config check - needsRebuild: ${needsRebuild}, configChanged: ${configChanged}`)
-          console.log(`[ClaudeManager][${conversationId}] Existing config:`, JSON.stringify(existing.config))
-          console.log(`[ClaudeManager][${conversationId}] Request config:`, JSON.stringify(requestConfig))
-          console.log(`[ClaudeManager][${conversationId}] Config generations - existing: ${existing.configGeneration}, current: ${this.configGeneration}`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Config check - needsRebuild: ${needsRebuild}, configChanged: ${configChanged}`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Existing config: ${JSON.stringify(existing.config)}`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Request config: ${JSON.stringify(requestConfig)}`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Config generations - existing: ${existing.configGeneration}, current: ${this.configGeneration}`)
         }
 
         if (needsRebuild || configChanged) {
           // If request in flight, defer rebuild
           if (this.activeSessions.has(conversationId)) {
-            console.log(`[ClaudeManager][${conversationId}] Config changed but request in flight, deferring rebuild`)
+            log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Config changed but request in flight, deferring rebuild`)
             existing.lastUsedAt = Date.now()
             return existing.session
           }
 
-          console.log(`[ClaudeManager][${conversationId}] Config changed, rebuilding session`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Config changed, rebuilding session`)
           this.cleanupSession(conversationId, 'config changed')
           // Fall through to create new session
         } else {
@@ -1433,17 +1436,17 @@ export class ClaudeManager {
           // we MUST rebuild to ensure the permission callback is active.
           if (canUseTool) {
             if (this.activeSessions.has(conversationId)) {
-              console.log(`[ClaudeManager][${conversationId}] canUseTool provided but request in flight, deferring rebuild`)
+              log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] canUseTool provided but request in flight, deferring rebuild`)
               existing.lastUsedAt = Date.now()
               return existing.session
             }
-            console.log(`[ClaudeManager][${conversationId}] canUseTool provided, rebuilding session to inject permission callback`)
+            log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] canUseTool provided, rebuilding session to inject permission callback`)
             this.cleanupSession(conversationId, 'canUseTool injection needed')
             // Fall through to create new session (with canUseTool)
           } else {
             existing.config = requestConfig
             existing.configGeneration = this.configGeneration
-            console.log(`[DIAG][${conversationId}] REUSING existing session (no canUseTool)`)
+            log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] REUSING existing session (no canUseTool)`)
             existing.lastUsedAt = Date.now()
             return existing.session
           }
@@ -1453,8 +1456,8 @@ export class ClaudeManager {
 
     // Create new session
     // [DIAG-1.3] Log new session creation
-    console.log(`[DIAG][${conversationId}] Creating NEW session, permissionMode will be set by buildSdkOptions, canUseTool=${!!canUseTool}`)
-    console.log(`[ClaudeManager][${conversationId}] Creating new V2 session with workDir=${effectiveWorkDir}...`)
+    log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Creating NEW session, permissionMode will be set by buildSdkOptions, canUseTool=${!!canUseTool}`)
+    log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Creating new V2 session with workDir=${effectiveWorkDir}...`)
     // Sync contextWindow to instance field so getCurrentConfig() and needsSessionRebuild
     // can detect changes when the user switches models with different context windows.
     if (contextWindow !== undefined && contextWindow !== this.contextWindow) {
@@ -1470,10 +1473,10 @@ export class ClaudeManager {
     if (canUseTool) {
       sdkOptions.canUseTool = canUseTool
       // [DIAG-1.2] Log canUseTool set on sdkOptions
-      console.log(`[DIAG][${conversationId}] canUseTool SET on sdkOptions (type=${typeof canUseTool})`)
+      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] canUseTool SET on sdkOptions (type=${typeof canUseTool})`)
     } else {
       // [DIAG-1.2] Log canUseTool is UNDEFINED — permission checks DISABLED
-      console.log(`[DIAG][${conversationId}] canUseTool is UNDEFINED — permission checks DISABLED`)
+      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] canUseTool is UNDEFINED — permission checks DISABLED`)
     }
 
     // Add hyper-space MCP proxy server if provided
@@ -1490,7 +1493,7 @@ export class ClaudeManager {
         }
       }
       sdkOptions.mcpServers = { 'hyper-space': hyperSpaceMcpServer }
-      console.log(`[ClaudeManager][${conversationId}] Injecting hyper-space MCP proxy server`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Injecting hyper-space MCP proxy server`)
     }
 
     // Add AICO-Bot MCP proxy for built-in tools (aico-bot-apps, gh-search, ai-browser)
@@ -1508,7 +1511,7 @@ export class ClaudeManager {
         ...(sdkOptions.mcpServers || {}),
         'aico-bot-builtin': aicoBotBuiltinMcpServer,
       }
-      console.log(`[ClaudeManager][${conversationId}] Injecting aico-bot-builtin MCP server (WebSocket bridge)`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Injecting aico-bot-builtin MCP server (WebSocket bridge)`)
     }
 
     // Add background-tasks MCP server (stdio transport - spawned as child process)
@@ -1525,12 +1528,12 @@ export class ClaudeManager {
             args: [serverScript],
           },
         }
-        console.log(`[ClaudeManager][${conversationId}] Injecting background-tasks MCP server (stdio): ${serverScript}`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Injecting background-tasks MCP server (stdio): ${serverScript}`)
       } else {
-        console.warn(`[ClaudeManager][${conversationId}] background-tasks-mcp-server.js not found at ${serverScript}, skipping`)
+        log.warn(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] background-tasks-mcp-server.js not found at ${serverScript}, skipping`)
       }
     } catch (e) {
-      console.error(`[ClaudeManager][${conversationId}] Failed to configure background-tasks MCP server:`, e)
+      log.error(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Failed to configure background-tasks MCP server: ${e instanceof Error ? e.message : String(e)}`)
     }
 
     if (this.aicoBotMcpUrl) {
@@ -1546,46 +1549,37 @@ export class ClaudeManager {
         ...(sdkOptions.mcpServers || {}),
         'aico-bot-builtin': mcpConfig,
       }
-      console.log(`[ClaudeManager][${conversationId}] Injecting AICO-Bot MCP proxy (HTTP fallback): ${this.aicoBotMcpUrl}`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Injecting AICO-Bot MCP proxy (HTTP fallback): ${this.aicoBotMcpUrl}`)
     }
 
     // CRITICAL: Requires SDK patch for resume and maxThinkingTokens support
     // Native SDK V2 Session doesn't support these parameters
     if (effectiveResumeId) {
       sdkOptions.resume = effectiveResumeId
-      console.log(`[ClaudeManager][${conversationId}] Resuming session: ${effectiveResumeId}`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Resuming session: ${effectiveResumeId}`)
     } else if (resumeSessionId) {
-      console.log(`[ClaudeManager][${conversationId}] Skipping resume due to workDir change (old: ${existing?.config.workDir}, new: ${effectiveWorkDir})`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Skipping resume due to workDir change (old: ${existing?.config.workDir}, new: ${effectiveWorkDir})`)
     }
     if (maxThinkingTokens) {
       sdkOptions.maxThinkingTokens = maxThinkingTokens
-      console.log(`[ClaudeManager][${conversationId}] Max thinking tokens: ${maxThinkingTokens}`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Max thinking tokens: ${maxThinkingTokens}`)
     }
 
     const startTime = Date.now()
 
-    console.log(`[ClaudeManager] Creating V2 session with options:`, {
-      model: sdkOptions.model,
-      cwd: sdkOptions.cwd,
-      hasAuthToken: !!this.apiKey,
-      baseUrl: this.baseUrl,
-      permissionMode: sdkOptions.permissionMode,
-      allowedTools: sdkOptions.allowedTools?.length,
-      resume: !!effectiveResumeId,
-      maxThinkingTokens: maxThinkingTokens
-    })
+    log.info(SCOPE.CLAUDE_MGR, `Creating V2 session: model=${sdkOptions.model}, cwd=${sdkOptions.cwd}, hasAuthToken=${!!this.apiKey}, baseUrl=${this.baseUrl}, permissionMode=${sdkOptions.permissionMode}, allowedTools=${sdkOptions.allowedTools?.length}, resume=${!!effectiveResumeId}, maxThinkingTokens=${maxThinkingTokens}`)
     // [DIAG-1.4] Log full SDK options for permission debugging
-    console.log(`[DIAG][${conversationId}] SDK options: permissionMode=${sdkOptions.permissionMode}, canUseTool=${typeof sdkOptions.canUseTool}, allowedTools=[${(sdkOptions.allowedTools || []).join(', ')}]`)
+    log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] SDK options: permissionMode=${sdkOptions.permissionMode}, canUseTool=${typeof sdkOptions.canUseTool}, allowedTools=[${(sdkOptions.allowedTools || []).join(', ')}]`)
 
     const session = unstable_v2_createSession(sdkOptions as any) as unknown as SDKSession
     const pid = (session as any).pid
-    console.log(`[ClaudeManager][${conversationId}] V2 session created in ${Date.now() - startTime}ms, PID: ${pid ?? 'unavailable'}`)
+    log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] V2 session created in ${Date.now() - startTime}ms, PID: ${pid ?? 'unavailable'}`)
 
     // Register process exit listener for immediate cleanup
     // Staleness guard: skip if session was replaced by a newer one
     registerProcessExitListener(session, conversationId, (id) => {
       if (this.sessions.get(id)?.session !== session) {
-        console.log(`[ClaudeManager][${id}] Process exited but session was replaced, skipping cleanup`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(id)}] Process exited but session was replaced, skipping cleanup`)
         return
       }
       // Notify external listeners (e.g. server.ts) before cleanup
@@ -1661,7 +1655,7 @@ export class ClaudeManager {
     const pending = this.pendingMessages.get(conversationId) || []
     pending.push({ content, options })
     this.pendingMessages.set(conversationId, pending)
-    console.log(`[ClaudeManager][${conversationId}] Message queued (${pending.length} pending)`)
+    log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Message queued (${pending.length} pending)`)
     return true
   }
 
@@ -1725,8 +1719,7 @@ export class ClaudeManager {
     onPermissionRequest?: (id: string, toolName: string, toolInput: Record<string, unknown>) => Promise<boolean>
   ): AsyncGenerator<{ type: string; data?: any }> {
     // Use async session creation with workDir from options
-    console.log(`[ClaudeManager] streamChat called with options.workDir=${options.workDir || 'undefined'}, this.workDir=${this.workDir || 'undefined'}`)
-    console.log(`[ClaudeManager] streamChat called with resumeSessionId=${resumeSessionId || 'undefined'}, maxThinkingTokens=${options.maxThinkingTokens || 'undefined'}`)
+    log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] streamChat: model=${options.model || 'default'}, workDir=${options.workDir || this.workDir || 'undefined'}`)
 
     // When running as a Worker task, suppress worker:started/completed events for
     // SDK internal sub-agents to avoid creating extra Worker tabs on the frontend.
@@ -1741,7 +1734,7 @@ export class ClaudeManager {
     // Create hyper-space MCP server if configured
     let hyperSpaceMcpServer: any = undefined
     if (options.hyperSpaceTools && hyperSpaceToolExecutor) {
-      console.log(`[ClaudeManager] Creating hyper-space MCP server (bridge mode) for worker ${options.hyperSpaceTools.workerName}`)
+      log.info(SCOPE.CLAUDE_MGR, `Creating hyper-space MCP server (bridge mode) for worker ${options.hyperSpaceTools.workerName}`)
       hyperSpaceMcpServer = this.createHyperSpaceMcpServerLegacy(options.hyperSpaceTools, hyperSpaceToolExecutor)
     }
 
@@ -1749,7 +1742,7 @@ export class ClaudeManager {
     // This is the WebSocket MCP Bridge — tools delegate to the AICO-Bot client via WebSocket
     let aicoBotBuiltinMcpServer: any = undefined
     if (aicoBotMcpToolDefs && aicoBotMcpToolDefs.length > 0 && aicoBotMcpToolExecutor) {
-      console.log(`[ClaudeManager] Creating aico-bot-builtin MCP server (WebSocket bridge) with ${aicoBotMcpToolDefs.length} tools from AICO-Bot client`)
+      log.info(SCOPE.CLAUDE_MGR, `Creating aico-bot-builtin MCP server (WebSocket bridge) with ${aicoBotMcpToolDefs.length} tools from AICO-Bot client`)
       aicoBotBuiltinMcpServer = this.createAicoBotBuiltinMcpServer(aicoBotMcpToolDefs, aicoBotMcpToolExecutor)
     }
 
@@ -1761,13 +1754,13 @@ export class ClaudeManager {
     if (existingSessionInfo && existingSessionInfo.mcpToolSignature !== newMcpToolSignature) {
       const wasRebuild = existingSessionInfo.mcpToolSignature !== undefined || newMcpToolSignature !== undefined
       if (wasRebuild) {
-        console.log(`[ClaudeManager][${sessionId}] MCP tool set changed, rebuilding session`)
-        console.log(`[ClaudeManager][${sessionId}] Old: ${existingSessionInfo.mcpToolSignature || '(none)'}`)
-        console.log(`[ClaudeManager][${sessionId}] New: ${newMcpToolSignature || '(none)'}`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] MCP tool set changed, rebuilding session`)
+        log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Old: ${existingSessionInfo.mcpToolSignature || '(none)'}`)
+        log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] New: ${newMcpToolSignature || '(none)'}`)
         if (!this.activeSessions.has(sessionId)) {
           this.cleanupSession(sessionId, 'MCP tools changed')
         } else {
-          console.log(`[ClaudeManager][${sessionId}] MCP tools changed but request in flight, deferring rebuild`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] MCP tools changed but request in flight, deferring rebuild`)
         }
       }
     }
@@ -1797,7 +1790,7 @@ export class ClaudeManager {
 
     const canUseTool = (onAskUserQuestion || onPermissionRequest) ? async (toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) => {
       // [DIAG-1.5] Log every canUseTool invocation
-      console.log(`[DIAG] canUseTool INVOKED: toolName=${toolName}, input=${JSON.stringify(input).substring(0, 200)}`)
+      log.debug(SCOPE.CLAUDE_MGR, `canUseTool INVOKED: toolName=${toolName}, input=${JSON.stringify(input).substring(0, 200)}`)
 
       // AskUserQuestion: forward to AICO-Bot client
       if (toolName === 'AskUserQuestion' && onAskUserQuestion) {
@@ -1806,7 +1799,7 @@ export class ClaudeManager {
           question: string; header: string
           options: Array<{ label: string; description: string }>; multiSelect: boolean
         }>
-        console.log(`[ClaudeManager] AskUserQuestion: id=${id}, questions=${questions?.length || 0}`)
+        log.debug(SCOPE.CLAUDE_MGR, `AskUserQuestion: id=${id}, questions=${questions?.length || 0}`)
         const answerPromise = onAskUserQuestion(id, questions || [])
         if (opts.signal) {
           if (opts.signal.aborted) return { behavior: 'deny' as const, message: 'This operation was interrupted. Continue with a safe alternative approach.' }
@@ -1814,10 +1807,10 @@ export class ClaudeManager {
         }
         try {
           const answers = await answerPromise
-          console.log(`[ClaudeManager] AskUserQuestion answered: id=${id}`, answers)
+          log.debug(SCOPE.CLAUDE_MGR, `AskUserQuestion answered: id=${id} ${JSON.stringify(answers)}`)
           return { behavior: 'allow' as const, updatedInput: { ...input, answers } }
         } catch (error) {
-          console.log(`[ClaudeManager] AskUserQuestion cancelled: id=${id}`, (error as Error).message)
+          log.debug(SCOPE.CLAUDE_MGR, `AskUserQuestion cancelled: id=${id} ${(error as Error).message}`)
           return { behavior: 'deny' as const, message: 'The user cancelled this question. Do not retry the same question. Continue with the best reasonable assumption or ask a different way.' }
         }
       }
@@ -1834,7 +1827,7 @@ export class ClaudeManager {
             return { behavior: 'allow' as const, updatedInput: input }
           }
           const id = `perm-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
-          console.log(`[ClaudeManager] Destructive Bash detected: ${command.substring(0, 100)}, requesting permission`)
+          log.info(SCOPE.CLAUDE_MGR, `Destructive Bash detected: ${command.substring(0, 100)}, requesting permission`)
           const approvalPromise = onPermissionRequest(id, toolName, input)
           if (opts.signal) {
             if (opts.signal.aborted) return { behavior: 'deny' as const, message: `The permission request for this ${toolName} command was interrupted: ${command.substring(0, 200)}. The operation was not performed. Suggest safer alternatives and ask the user how to proceed.` }
@@ -1842,12 +1835,12 @@ export class ClaudeManager {
           }
           try {
             const approved = await approvalPromise
-            console.log(`[ClaudeManager] Permission ${id}: ${approved ? 'APPROVED' : 'DENIED'}`)
+            log.info(SCOPE.CLAUDE_MGR, `Permission ${id}: ${approved ? 'APPROVED' : 'DENIED'}`)
             return approved
               ? { behavior: 'allow' as const, updatedInput: input }
               : { behavior: 'deny' as const, message: `The user denied permission to execute this ${toolName} command: ${command.substring(0, 200)}. Explain that the operation was not performed because they declined it. Briefly explain why it may carry risk, then suggest safer alternative approaches. Ask the user which alternative they prefer.` }
           } catch (error) {
-            console.log(`[ClaudeManager] Permission ${id}: cancelled`, (error as Error).message)
+            log.debug(SCOPE.CLAUDE_MGR, `Permission ${id}: cancelled ${(error as Error).message}`)
             return { behavior: 'deny' as const, message: `The permission request for this ${toolName} command was cancelled or timed out: ${command.substring(0, 200)}. The operation was not performed. Suggest safer alternative approaches and ask the user how they would like to proceed.` }
           }
         }
@@ -1859,21 +1852,21 @@ export class ClaudeManager {
         const skillName = cmd.replace(/^\/+/, '').trim()
         if (skillName && subAgentAllowedSkills.has(skillName)) {
           activeSkillAllowsSubAgents = true
-          console.log(`[ClaudeManager] Skill "${skillName}" allows sub-agents`)
+          log.debug(SCOPE.CLAUDE_MGR, `Skill "${skillName}" allows sub-agents`)
         }
       }
 
       // Agent/Task: only allow if user explicitly requested or active skill requires it
       if (toolName === 'Agent' || toolName === 'Task') {
         if (userRequestedSubAgent) {
-          console.log(`[ClaudeManager] ${toolName} auto-allowed: user explicitly requested sub-agent`)
+          log.info(SCOPE.CLAUDE_MGR, `${toolName} auto-allowed: user explicitly requested sub-agent`)
           return { behavior: 'allow' as const, updatedInput: input }
         }
         if (activeSkillAllowsSubAgents) {
-          console.log(`[ClaudeManager] ${toolName} auto-allowed: active skill requires sub-agents`)
+          log.info(SCOPE.CLAUDE_MGR, `${toolName} auto-allowed: active skill requires sub-agents`)
           return { behavior: 'allow' as const, updatedInput: input }
         }
-        console.log(`[ClaudeManager] ${toolName} denied: user did not request and no skill requires it`)
+        log.info(SCOPE.CLAUDE_MGR, `${toolName} denied: user did not request and no skill requires it`)
         return {
           behavior: 'deny' as const,
           message: 'Sub-agent creation is not allowed unless explicitly requested by the user or the current skill requires it. Please complete the task directly using available tools.',
@@ -1885,7 +1878,7 @@ export class ClaudeManager {
     } : undefined
 
     // [DIAG-1.1] Log canUseTool creation and type
-    console.log(`[DIAG][${sessionId}] canUseTool callback: ${typeof canUseTool}, hasPermissionRequest=${!!onPermissionRequest}, hasAskUserQuestion=${!!onAskUserQuestion}`)
+    log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] canUseTool callback: ${typeof canUseTool}, hasPermissionRequest=${!!onPermissionRequest}, hasAskUserQuestion=${!!onAskUserQuestion}`)
 
     let session = await this.getOrCreateSession(sessionId, options.workDir, resumeSessionId, options.maxThinkingTokens, hyperSpaceMcpServer, options.system, aicoBotBuiltinMcpServer, options.contextWindow, clientCredentials, canUseTool, newMcpToolSignature)
 
@@ -1898,12 +1891,12 @@ export class ClaudeManager {
         // Always call setMaxThinkingTokens, pass null to disable (aligned with local)
         const thinkingTokens = options.maxThinkingTokens ?? null
         await (session as any).setMaxThinkingTokens(thinkingTokens)
-        console.log(`[ClaudeManager][${sessionId}] Thinking mode: ${thinkingTokens ? `ON (${thinkingTokens} tokens)` : 'OFF'}`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Thinking mode: ${thinkingTokens ? `ON (${thinkingTokens} tokens)` : 'OFF'}`)
       } else {
-        console.warn(`[ClaudeManager][${sessionId}] setMaxThinkingTokens not available - SDK patch may not be applied`)
+        log.warn(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] setMaxThinkingTokens not available - SDK patch may not be applied`)
       }
     } catch (e) {
-      console.error(`[ClaudeManager][${sessionId}] Failed to set thinking tokens:`, e)
+      log.error(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Failed to set thinking tokens: ${e instanceof Error ? e.message : String(e)}`)
     }
 
     // Register as active session for in-flight tracking
@@ -2007,13 +2000,13 @@ export class ClaudeManager {
         throw new Error('Last message must be from user')
       }
 
-      console.log(`[ClaudeManager] Sending last user message: ${lastMessage.content.substring(0, 50)}...`)
+      log.debug(SCOPE.CLAUDE_MGR, `Sending last user message: ${lastMessage.content.substring(0, 50)}...`)
 
       // DEFENSIVE: Handle race condition where close:session arrives concurrently
       // (from stopGeneration) and closes the SDK session between getOrCreateSession
       // returning and session.send() being called. Detect and rebuild.
       if ((session as any).closed) {
-        console.warn(`[ClaudeManager][${sessionId}] Session closed before send (race condition), rebuilding...`)
+        log.warn(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Session closed before send (race condition), rebuilding...`)
         this.cleanupSession(sessionId, 'session closed before send (race)')
         // Recreate session — skip resume since the old session is gone
         const freshSession = await this.getOrCreateSession(
@@ -2035,14 +2028,16 @@ export class ClaudeManager {
 
       await session.send(lastMessage.content)
 
-      console.log(`[ClaudeManager] Starting stream for session ${sessionId}...`)
+      const streamStartTime = Date.now()
+      let firstTokenTime: number | undefined
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Starting stream...`)
 
       // First-event safety timeout: if no event arrives within N seconds,
       // the session is likely corrupted (mid-tool-call hang). Abort and let caller rebuild.
       const isFirstEventTimeout = sessionInfo?.interrupted ? ClaudeManager.FIRST_EVENT_TIMEOUT_MS : 0
       if (isFirstEventTimeout > 0) {
         firstEventTimer = setTimeout(() => {
-          console.warn(`[ClaudeManager][${sessionId}] No event in ${isFirstEventTimeout / 1000}s — session likely corrupted, aborting`)
+          log.warn(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] No event in ${isFirstEventTimeout / 1000}s — session likely corrupted, aborting`)
           abortController.abort()
         }, isFirstEventTimeout)
       }
@@ -2053,7 +2048,7 @@ export class ClaudeManager {
         // CRITICAL: Check for interrupt at the start of each iteration
         // This allows the stream to exit early when user clicks stop button
         if (this.checkAndClearInterrupt(sessionId)) {
-          console.log(`[ClaudeManager][${sessionId}] Interrupt detected, exiting stream loop`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Interrupt detected, exiting stream loop`)
           break
         }
 
@@ -2067,10 +2062,8 @@ export class ClaudeManager {
 
         const evt = event as any
 
-        // Log ALL events for debugging (first 50 events)
-        if (eventCount <= 50) {
-          console.log(`[ClaudeManager] Event ${eventCount}: type=${evt.type}`, JSON.stringify(evt).substring(0, 500))
-        }
+        // Log event type for debugging (no JSON payload — too noisy at info level)
+        log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Event ${eventCount}: type=${evt.type}`)
 
         // ========== Handle stream_event for token-level streaming ==========
         if (evt.type === 'stream_event') {
@@ -2136,7 +2129,7 @@ export class ClaudeManager {
             }
 
             onThought?.(thought)
-            console.log(`[ClaudeManager] Thinking block started: ${thoughtId}`)
+            log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Thinking block started: ${thoughtId}`)
             continue
           }
 
@@ -2185,7 +2178,7 @@ export class ClaudeManager {
             }
 
             onThought?.(thought)
-            console.log(`[ClaudeManager] Tool use block started: ${toolName} (${thoughtId})`)
+            log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Tool use: ${toolName}`)
             continue
           }
 
@@ -2236,7 +2229,7 @@ export class ClaudeManager {
                   isComplete: true  // Signal: thinking is complete
                 })
 
-                console.log(`[ClaudeManager] Thinking block complete, length: ${blockState.content.length}`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Thinking block complete, length: ${blockState.content.length}`)
               } else if (blockState.type === 'tool_use') {
                 // Tool use block complete - parse JSON and send final state
                 let toolInput: Record<string, unknown> = {}
@@ -2245,7 +2238,7 @@ export class ClaudeManager {
                     toolInput = JSON.parse(blockState.content)
                   }
                 } catch (e) {
-                  console.error(`[ClaudeManager] Failed to parse tool input JSON:`, e)
+                  log.error(SCOPE.CLAUDE_MGR, `Failed to parse tool input JSON: ${e instanceof Error ? e.message : String(e)}`)
                 }
 
                 // Record mapping for merging tool_result later
@@ -2274,7 +2267,7 @@ export class ClaudeManager {
                   input: toolInput
                 })
 
-                console.log(`[ClaudeManager] Tool use block complete [${blockState.toolName}], input: ${JSON.stringify(toolInput).substring(0, 100)}`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Tool use complete [${blockState.toolName}]`)
               }
 
               // Clean up tracking state
@@ -2288,8 +2281,9 @@ export class ClaudeManager {
             const text = streamEvent.delta.text || ''
             if (text) {
               textCount++
-              if (textCount <= 5) {
-                console.log(`[ClaudeManager] Text delta: ${text.substring(0, 50)}...`)
+              if (textCount === 1 && !firstTokenTime) {
+                firstTokenTime = Date.now()
+                log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] First response in ${((firstTokenTime - (streamStartTime as number)) / 1000).toFixed(1)}s`)
               }
               yield { type: 'text', data: { text } }
             }
@@ -2418,8 +2412,8 @@ export class ClaudeManager {
             const errorStatus = evt.error_status as number | undefined
             const error = evt.error as string | undefined
             if (errorStatus === 401 && error === 'authentication_failed') {
-              console.warn(
-                `[ClaudeManager][${sessionId}] SDK auth retry: attempt=${evt.attempt}/${evt.max_retries}, ` +
+              log.warn(SCOPE.CLAUDE_MGR,
+                `[${shortId(sessionId)}] SDK auth retry: attempt=${evt.attempt}/${evt.max_retries}, ` +
                 `error_status=${errorStatus}, error=${error}`
               )
               yield { type: 'auth_retry_required', data: {
@@ -2464,7 +2458,7 @@ export class ClaudeManager {
               }
             }
 
-            console.log(`[ClaudeManager] Subagent started: ${taskId} - ${description.substring(0, 80)}`)
+            log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Subagent started: ${taskId} - ${description.substring(0, 80)}`)
             continue
           }
 
@@ -2482,7 +2476,7 @@ export class ClaudeManager {
                   status: evt.status === 'completed' ? 'completed' : 'failed'
                 }}
               }
-              console.log(`[ClaudeManager] Subagent completed: ${notifTaskId} status=${evt.status}`)
+              log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Subagent completed: ${notifTaskId} status=${evt.status}`)
             }
             continue
           }
@@ -2511,13 +2505,13 @@ export class ClaudeManager {
             timestamp: new Date().toISOString()
           }
           onThought?.(systemThought)
-          console.log(`[ClaudeManager] System thought: ${systemThought.content}`)
+          log.info(SCOPE.CLAUDE_MGR, `System: Connected | Model: ${modelName}`)
 
           // Capture session_id for session resumption
           const sessionIdFromMsg = (evt as any).session_id || (evt as any).message?.session_id
           if (sessionIdFromMsg && !capturedSessionId) {
             capturedSessionId = sessionIdFromMsg as string
-            console.log(`[ClaudeManager] Captured SDK session_id: ${capturedSessionId}`)
+            log.debug(SCOPE.CLAUDE_MGR, `Captured SDK session_id: ${capturedSessionId}`)
             // Yield session_id to caller for persistence
             yield { type: 'session_id', data: { sessionId: capturedSessionId } }
           }
@@ -2530,7 +2524,7 @@ export class ClaudeManager {
                 trigger: compactMetadata.trigger,
                 preTokens: compactMetadata.pre_tokens
               })
-              console.log(`[ClaudeManager] Compact boundary: trigger=${compactMetadata.trigger}, pre_tokens=${compactMetadata.pre_tokens}`)
+              log.info(SCOPE.CLAUDE_MGR, `Compact boundary: trigger=${compactMetadata.trigger}, pre_tokens=${compactMetadata.pre_tokens}`)
             }
           }
 
@@ -2538,7 +2532,7 @@ export class ClaudeManager {
           const mcpServers = evt.mcp_servers as Array<{ name: string; status: string }> | undefined
           if (mcpServers && mcpServers.length > 0) {
             onMcpStatus?.({ servers: mcpServers })
-            console.log(`[ClaudeManager] MCP servers: ${JSON.stringify(mcpServers)}`)
+            log.debug(SCOPE.CLAUDE_MGR, `MCP servers: ${mcpServers.map(s => `${s.name}(${s.status})`).join(', ')}`)
           }
 
           continue
@@ -2558,7 +2552,7 @@ export class ClaudeManager {
         // Fallback: if no stream_event was received, process thinking/tool_use blocks here
         if (evt.type === 'assistant') {
           const message = evt.message
-          console.log(`[ClaudeManager] Assistant event - message.content types:`, message?.content?.map((b: any) => b.type))
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Assistant event - content types: ${message?.content?.map((b: any) => b.type).join(',')}`)
 
           // Process text blocks ALWAYS (not just fallback) - for "AI" label in thinking process
           // Text blocks show the AI's intermediate text responses in the timeline
@@ -2575,7 +2569,7 @@ export class ClaudeManager {
                   isStreaming: false
                 }
                 onThought?.(thought)
-                console.log(`[ClaudeManager] Text block from assistant message: ${(thought.content || '').substring(0, 100)}...`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Text block: ${(thought.content || '').substring(0, 80)}...`)
               }
             }
           }
@@ -2593,7 +2587,7 @@ export class ClaudeManager {
                   isStreaming: false
                 }
                 onThought?.(thought)
-                console.log(`[ClaudeManager] [FALLBACK] Thinking block from assistant message: ${(thought.content || '').substring(0, 100)}...`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] [FALLBACK] Thinking block: ${(thought.content || '').substring(0, 80)}...`)
               } else if (block.type === 'tool_use' && block.id && block.name) {
                 const thoughtId = `thought-tool-${Date.now()}-${counter++}`
                 const toolId = block.id
@@ -2610,7 +2604,7 @@ export class ClaudeManager {
                   isReady: true
                 }
                 onThought?.(thought)
-                console.log(`[ClaudeManager] [FALLBACK] Tool use block from assistant message: ${block.name}`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] [FALLBACK] Tool use block: ${block.name}`)
               }
             }
           }
@@ -2621,7 +2615,7 @@ export class ClaudeManager {
         // User events - handle tool_result merging (SDK returns tool_result in user messages)
         if (evt.type === 'user') {
           const message = evt.message
-          console.log(`[ClaudeManager] User event - checking for tool_result`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] User event - checking for tool_result`)
           if (message?.content && Array.isArray(message.content)) {
             for (const block of message.content) {
               // Handle tool_result blocks - merge into corresponding tool_use
@@ -2629,7 +2623,7 @@ export class ClaudeManager {
                 const toolUseId = block.tool_use_id
                 const toolUseThoughtId = toolIdToThoughtId.get(toolUseId)
 
-                console.log(`[ClaudeManager] Tool result found: tool_use_id=${toolUseId}, thoughtId=${toolUseThoughtId || 'not found'}`)
+                log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Tool result found: tool_use_id=${toolUseId}`)
 
                 if (toolUseThoughtId) {
                   // Found corresponding tool_use - merge result into it
@@ -2660,10 +2654,10 @@ export class ClaudeManager {
                     output: resultContent
                   })
 
-                  console.log(`[ClaudeManager] Tool result merged into thought ${toolUseThoughtId}`)
+                      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Tool result merged into thought ${toolUseThoughtId}`)
                 } else {
                   // No mapping found - this can happen if tool_use wasn't streamed
-                  console.log(`[ClaudeManager] Tool result no mapping: ${toolUseId}`)
+                  log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Tool result no mapping: ${toolUseId}`)
                 }
               }
             }
@@ -2673,14 +2667,14 @@ export class ClaudeManager {
 
         // Result events
         if (evt.type === 'result') {
-          console.log(`[ClaudeManager] Result event: is_error=${evt.is_error}, result=${evt.result?.substring(0, 100)}`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Result: is_error=${evt.is_error}`)
 
           // Capture session_id from result event if not already captured
           if (!capturedSessionId) {
             const sessionIdFromMsg = (evt as any).session_id
             if (sessionIdFromMsg) {
               capturedSessionId = sessionIdFromMsg as string
-              console.log(`[ClaudeManager] Captured SDK session_id from result: ${capturedSessionId}`)
+              log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Captured SDK session_id from result: ${capturedSessionId}`)
               yield { type: 'session_id', data: { sessionId: capturedSessionId } }
             }
           }
@@ -2689,7 +2683,8 @@ export class ClaudeManager {
           // SDK result event contains usage info: { usage: { input_tokens, output_tokens, cache_read_input_tokens, cache_creation_input_tokens } }
           const usage = (evt as any).usage
           if (usage) {
-            console.log(`[ClaudeManager] Token usage: input=${usage.input_tokens}, output=${usage.output_tokens}, cache_read=${usage.cache_read_input_tokens}, cache_create=${usage.cache_creation_input_tokens}`)
+            log.info(SCOPE.CLAUDE_MGR, `Token usage: input=${usage.input_tokens}, output=${usage.output_tokens}, cache_read=${usage.cache_read_input_tokens}, cache_create=${usage.cache_creation_input_tokens}`)
+            logConversation(`RequestHandler: stream completed status=ok model=${options.model || this.model || 'unknown'} tokens={in:${usage.input_tokens},out:${usage.output_tokens},cache:${usage.cache_read_input_tokens}}`)
             // Use configured contextWindow (from ChatOptions or instance field) as authoritative value,
             // falling back to SDK's context_window or 200K
             const effectiveContextWindow = options.contextWindow ?? this.contextWindow ?? usage.context_window ?? 200000
@@ -2738,14 +2733,14 @@ export class ClaudeManager {
       if (errorMsg === 'Stream aborted' || errorMsg === 'Stream interrupted') {
         // Check if this was caused by first-event timeout (session corruption)
         if (sessionInfo?.interrupted && eventCount === 0) {
-          console.warn(`[ClaudeManager][${sessionId}] First-event timeout triggered — session is corrupted, cleaning up for rebuild`)
+          log.warn(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] First-event timeout triggered — session is corrupted, cleaning up for rebuild`)
           this.cleanupSession(sessionId, 'first-event timeout - session corrupted')
           // Throw a recognizable error so server.ts retries without resume
           throw new Error('SESSION_CORRUPTED: stream hung, needs rebuild')
         }
         // Expected interrupt — mark as aborted for cleanup, then exit gracefully
         wasAborted = true
-        console.log(`[ClaudeManager][${sessionId}] Stream stopped: ${errorMsg}`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Stream stopped: ${errorMsg}`)
         return
       }
 
@@ -2754,12 +2749,13 @@ export class ClaudeManager {
       // the session so the next message will rebuild fresh.
       // This is the fallback for the "try reuse first" optimization in getOrCreateSession.
       if (errorMsg.includes('process aborted') || errorMsg.includes('ECONNRESET') || errorMsg.includes('streamInput') || errorMsg.includes('Cannot send to closed session')) {
-        console.warn(`[ClaudeManager][${sessionId}] Session reuse failed (SDK state corruption), cleaning up for next message`)
+        log.warn(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Session reuse failed (SDK state corruption), cleaning up for next message`)
         this.cleanupSession(sessionId, 'reuse failed - SDK state corruption')
       }
 
       // Other errors — log and re-throw
-      console.error('[ClaudeManager] Stream chat error:', error)
+      log.error(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Stream chat error: ${error instanceof Error ? error.message : String(error)}`)
+      logConversation(`RequestHandler: stream error status=error model=${options.model || this.model || 'unknown'} error=${error instanceof Error ? error.message : String(error)}`)
       throw new Error(`Claude stream error: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       // Clean up any active subagents that didn't complete
@@ -2774,9 +2770,9 @@ export class ClaudeManager {
               agentId: state.agentId, agentName: state.agentName, taskId,
               result: '', error: 'Stopped by user', status: 'failed'
             }}
-            console.log(`[ClaudeManager] Subagent ${taskId} marked as stopped by user`)
+            log.info(SCOPE.CLAUDE_MGR, `Subagent ${taskId} marked as stopped by user`)
           } else {
-            console.log(`[ClaudeManager] Subagent ${taskId} silently cleaned up (normal stream end)`)
+            log.debug(SCOPE.CLAUDE_MGR, `Subagent ${taskId} silently cleaned up (normal stream end)`)
           }
         }
       }
@@ -2830,7 +2826,7 @@ export class ClaudeManager {
 
       return fullResponse
     } catch (error) {
-      console.error('[ClaudeManager] Chat error:', error)
+      log.error(SCOPE.CLAUDE_MGR, `Chat error: ${error instanceof Error ? error.message : String(error)}`)
       throw new Error(`Claude chat error: ${error instanceof Error ? error.message : String(error)}`)
     } finally {
       this.unregisterActiveSession(sessionId)
@@ -2852,7 +2848,7 @@ export class ClaudeManager {
   forceSessionRebuild(conversationId: string): void {
     const existing = this.sessions.get(conversationId)
     if (existing) {
-      console.log(`[ClaudeManager][${conversationId}] Force rebuilding session (auth retry)`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Force rebuilding session (auth retry)`)
       this.cleanupSession(conversationId, 'auth retry - credential refresh')
     }
     this.activeSessions.delete(conversationId)
@@ -2863,7 +2859,7 @@ export class ClaudeManager {
    */
   closeAllSessions(): void {
     const count = this.sessions.size
-    console.log(`[ClaudeManager] Closing all ${count} V2 sessions`)
+    log.info(SCOPE.CLAUDE_MGR, `Closing all ${count} V2 sessions`)
 
     for (const convId of Array.from(this.sessions.keys())) {
       this.cleanupSession(convId, 'app shutdown')
@@ -2878,16 +2874,16 @@ export class ClaudeManager {
   invalidateAllSessions(): void {
     const count = this.sessions.size
     if (count === 0) {
-      console.log('[ClaudeManager] No active sessions to invalidate')
+      log.info(SCOPE.CLAUDE_MGR, 'No active sessions to invalidate')
       return
     }
 
-    console.log(`[ClaudeManager] Invalidating ${count} sessions due to config change`)
+    log.info(SCOPE.CLAUDE_MGR, `Invalidating ${count} sessions due to config change`)
 
     for (const convId of Array.from(this.sessions.keys())) {
       // If request in flight, defer cleanup
       if (this.activeSessions.has(convId)) {
-        console.log(`[ClaudeManager] Deferring session close until idle: ${convId}`)
+        log.info(SCOPE.CLAUDE_MGR, `Deferring session close until idle: ${shortId(convId)}`)
         continue
       }
       this.cleanupSession(convId, 'config change')
@@ -2928,25 +2924,25 @@ export class ClaudeManager {
       if (streamInfo) {
         streamInfo.abortController.abort()
         this.activeStreamIterators.delete(conversationId)
-        console.log(`[ClaudeManager][${conversationId}] Aborted active stream iterator`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Aborted active stream iterator`)
       }
 
       // CRITICAL: Close the SDK session to release the underlying process
       // Without this, the SDK process continues running with potentially corrupted state
       try {
         info.session.close()
-        console.log(`[ClaudeManager][${conversationId}] SDK session closed`)
+        log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] SDK session closed`)
       } catch (e: any) {
         // Ignore EPIPE errors (process already exited)
         if (e?.code === 'EPIPE' || e?.message?.includes('EPIPE')) {
-          console.log(`[ClaudeManager][${conversationId}] Session close: EPIPE (process already exited)`)
+          log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session close: EPIPE (process already exited)`)
         } else {
-          console.warn(`[ClaudeManager][${conversationId}] Error closing session:`, e?.message || e)
+          log.warn(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Error closing session: ${e?.message || String(e)}`)
         }
       }
 
       this.sessions.delete(conversationId)
-      console.log(`[ClaudeManager][${conversationId}] Session removed from cache`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Session removed from cache`)
     }
   }
 
@@ -2962,7 +2958,7 @@ export class ClaudeManager {
     if (sessionInfo) {
       sessionInfo.interrupted = true
     }
-    console.log(`[ClaudeManager][${conversationId}] Marked as interrupted`)
+    log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Marked as interrupted`)
   }
 
   /**
@@ -2972,7 +2968,7 @@ export class ClaudeManager {
     const wasInterrupted = this.interruptedSessions.has(conversationId)
     if (wasInterrupted) {
       this.interruptedSessions.delete(conversationId)
-      console.log(`[ClaudeManager][${conversationId}] Interrupt flag cleared`)
+      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Interrupt flag cleared`)
     }
     return wasInterrupted
   }
@@ -2983,7 +2979,7 @@ export class ClaudeManager {
   forceAbortStreamIterator(conversationId: string): boolean {
     const iteratorInfo = this.activeStreamIterators.get(conversationId)
     if (iteratorInfo) {
-      console.log(`[ClaudeManager][${conversationId}] Force aborting stream iterator`)
+      log.info(SCOPE.CLAUDE_MGR, `[${shortId(conversationId)}] Force aborting stream iterator`)
       iteratorInfo.abortController.abort()
       this.activeStreamIterators.delete(conversationId)
       return true
@@ -3100,13 +3096,13 @@ export class ClaudeManager {
     const abortPromise = new Promise<never>((_, reject) => {
       const checkAbort = () => {
         if (abortController.signal.aborted) {
-          console.log(`[ClaudeManager][${sessionId}] Abort signal detected in wrapper`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Abort signal detected in wrapper`)
           reject(new Error('Stream aborted'))
           return
         }
         // Also check interrupt flag
         if (this.checkAndClearInterrupt(sessionId)) {
-          console.log(`[ClaudeManager][${sessionId}] Interrupt flag detected in wrapper`)
+          log.info(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Interrupt flag detected in wrapper`)
           reject(new Error('Stream interrupted'))
           return
         }
@@ -3140,11 +3136,11 @@ export class ClaudeManager {
         throw error
       }
       // Other errors - log and re-throw
-      console.error(`[ClaudeManager][${sessionId}] Stream wrapper error:`, error)
+      log.error(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Stream wrapper error: ${error instanceof Error ? error.message : String(error)}`)
       throw error
     } finally {
       if (pollTimer) clearTimeout(pollTimer)
-      console.log(`[ClaudeManager][${sessionId}] Stream wrapper cleanup complete`)
+      log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] Stream wrapper cleanup complete`)
     }
   }
 

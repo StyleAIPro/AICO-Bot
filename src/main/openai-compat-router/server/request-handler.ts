@@ -31,6 +31,9 @@ import { runInterceptors } from '../interceptors';
 import { applyProviderAdapter } from './provider-adapters';
 import { proxyFetch, getEffectiveProxyUrl } from '../../services/proxy';
 import { ProxyConnectError } from '../../services/proxy/proxy-fetch';
+import { createLogger } from '../../services/log';
+
+const logger = createLogger('RequestHandler');
 
 export interface RequestHandlerOptions {
   debug?: boolean;
@@ -653,7 +656,9 @@ export async function handleMessagesRequest(
   options: RequestHandlerOptions = {},
 ): Promise<void> {
   const { url: backendUrl, apiType: configApiType } = config;
-  console.log('[RequestHandler] handleMessagesRequest', backendUrl);
+  logger.info(
+    `handleMessagesRequest apiType=${configApiType} target=${backendUrl} model=${anthropicRequest.model}`,
+  );
 
   // Run interceptors on Anthropic-format request (before any conversion)
   const interceptResult = await runInterceptors(anthropicRequest, {

@@ -12,6 +12,7 @@ import {
 } from './base-stream-handler'
 import { safeJsonParse } from '../utils'
 import type { AnthropicStopReason } from '../types'
+import { log, SCOPE } from '../../logger.js'
 
 // Event types from OpenAI Responses API
 type ResponsesEventType =
@@ -70,7 +71,7 @@ export class OpenAIResponsesStreamHandler extends BaseStreamHandler {
           if (!data) continue
 
           if (this.debug) {
-            console.log('[OpenAIResponsesStream] Received:', data.slice(0, 200))
+            log.info(SCOPE.SERVER, `OpenAI Responses stream received: ${data.slice(0, 200)}`)
           }
 
           const chunkJson = safeJsonParse<any>(data)
@@ -81,7 +82,7 @@ export class OpenAIResponsesStreamHandler extends BaseStreamHandler {
       }
     } catch (error: any) {
       if (this.debug) {
-        console.error('[OpenAIResponsesStream] Error:', error)
+        log.error(SCOPE.SERVER, `OpenAI Responses stream error: ${error}`)
       }
     } finally {
       this.finishMessage()

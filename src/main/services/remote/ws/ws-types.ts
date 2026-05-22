@@ -75,7 +75,8 @@ export interface ServerMessage {
     | 'worker:completed'
     | 'ask:question'
     | 'permission:request'
-    | 'stream:alive';
+    | 'stream:alive'
+    | 'log';
   sessionId?: string;
   generationId?: string;
   data?: any;

@@ -7,12 +7,23 @@
 import type { Server } from 'node:http'
 import type { AddressInfo } from 'node:net'
 import type { RouterServerInfo, RouterOptions } from '../types'
+import type { LogEntry } from './router'
 import { createApp } from './router'
+import { log, SCOPE } from '../../logger.js'
 
 // Singleton state
 let server: Server | null = null
 let info: RouterServerInfo | null = null
 let starting: Promise<RouterServerInfo> | null = null
+let logCallback: ((entry: LogEntry) => void) | null = null
+
+/**
+ * Set a callback to receive log entries from the router.
+ * Must be called before the router is started (before first ensureOpenAICompatRouter call).
+ */
+export function setOnLogCallback(callback: (entry: LogEntry) => void): void {
+  logCallback = callback
+}
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
 
@@ -37,7 +48,7 @@ export async function ensureOpenAICompatRouter(
       const debug = options.debug === true
       const timeoutMs = options.timeoutMs ?? DEFAULT_TIMEOUT_MS
 
-      const app = createApp({ debug, timeoutMs })
+      const app = createApp({ debug, timeoutMs, onLog: logCallback ?? undefined })
 
       server = app.listen(0, '127.0.0.1', () => {
         const addr = server?.address() as AddressInfo | null
@@ -52,12 +63,12 @@ export async function ensureOpenAICompatRouter(
           baseUrl: `http://127.0.0.1:${addr.port}`
         }
 
-        console.log('[OpenAICompatRouter] Started on', info.baseUrl)
+        log.info(SCOPE.SERVER, `OpenAI Compat Router started on ${info.baseUrl}`)
         resolve(info)
       })
 
       server.on('error', (err) => {
-        console.error('[OpenAICompatRouter] Server error:', err)
+        log.error(SCOPE.SERVER, `OpenAI Compat Router server error: ${err}`)
         reject(err)
       })
     } catch (e) {
@@ -84,7 +95,7 @@ export async function stopOpenAICompatRouter(): Promise<void> {
     s.close(() => resolve())
   })
 
-  console.log('[OpenAICompatRouter] Stopped')
+  log.info(SCOPE.SERVER, 'OpenAI Compat Router stopped')
 }
 
 /**
@@ -103,6 +114,7 @@ export function isRouterRunning(): boolean {
 
 // Re-export components
 export { createApp } from './router'
+export type { LogEntry } from './router'
 export { handleMessagesRequest, handleCountTokensRequest } from './request-handler'
 export { withRequestQueue, generateQueueKey, clearRequestQueues, getPendingRequestCount } from './request-queue'
 export { shouldForceStream } from './api-type'
