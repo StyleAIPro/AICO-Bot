@@ -785,11 +785,13 @@ export class ClaudeManager {
     if (process.env.REMOTE_AGENT_API_TYPE === 'anthropic_passthrough') return 'anthropic'
     // No custom URL = default Anthropic
     if (!baseUrl) return 'anthropic'
+    // Normalize trailing slash for consistent matching
+    const normalized = baseUrl.replace(/\/+$/, '')
     // Known Anthropic URLs (including Dashscope Claude-as-a-Service /apps/anthropic)
-    if (baseUrl.includes('api.anthropic.com')) return 'anthropic'
-    if (baseUrl.includes('/anthropic')) return 'anthropic'
+    if (normalized.includes('api.anthropic.com')) return 'anthropic'
+    if (normalized.includes('/anthropic')) return 'anthropic'
     // Anthropic standard endpoint: /v1/messages or /messages
-    if (baseUrl.endsWith('/v1/messages') || baseUrl.endsWith('/messages')) return 'anthropic'
+    if (normalized.endsWith('/v1/messages') || normalized.endsWith('/messages')) return 'anthropic'
     // Everything else is treated as OpenAI-compatible
     return 'openai_compat'
   }
