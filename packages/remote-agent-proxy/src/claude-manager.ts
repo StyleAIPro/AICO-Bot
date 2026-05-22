@@ -1066,7 +1066,14 @@ export class ClaudeManager {
         options.env.ANTHROPIC_AUTH_TOKEN = effectiveApiKey
       }
       if (effectiveBaseUrl) {
-        options.env.ANTHROPIC_BASE_URL = effectiveBaseUrl
+        // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
+        // Strip these suffixes if user included them to avoid duplication.
+        const baseUrl = effectiveBaseUrl.replace(/\/+$/, '')
+          .replace(/\/v\/?messages$/, '')
+          .replace(/\/v\/?message$/, '')
+          .replace(/\/messages$/, '')
+          .replace(/\/message$/, '')
+        options.env.ANTHROPIC_BASE_URL = baseUrl
       }
       // Use the real model name — /anthropic endpoints (DashScope, Zhipu, etc.)
       // accept their own model names, not substituted Claude model names.
