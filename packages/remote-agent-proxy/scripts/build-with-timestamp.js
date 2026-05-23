@@ -19,7 +19,8 @@ console.log('Building remote-agent-proxy...')
 
 // Step 1: Compile TypeScript
 try {
-  execSync('tsc', { cwd: rootDir, stdio: 'inherit' })
+  const tscBin = path.join(projectRoot, 'node_modules', '.bin', process.platform === 'win32' ? 'tsc.cmd' : 'tsc')
+  execSync(`"${tscBin}"`, { cwd: rootDir, stdio: 'inherit' })
   console.log('TypeScript compilation successful')
 } catch (error) {
   console.error('TypeScript compilation failed')

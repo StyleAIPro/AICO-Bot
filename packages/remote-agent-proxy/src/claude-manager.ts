@@ -490,11 +490,9 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
 # Tools and Permissions
 You can use the following tools without requiring user approval: Read, Write, Edit, Grep, Glob, Bash, Skill
 
-## Network Access Tools Priority (CRITICAL)
-- **WebFetch and WebSearch are DISABLED** - Do not use these tools under any circumstances.
-- **For web content**: Always use \`ai-browser\` tools (browser_new_page, browser_snapshot, browser_click, etc.).
-- **For GitHub content**: Always use \`gh-search\` tools (gh_search_repos, gh_search_issues, gh_search_prs, gh_search_code, gh_repo_view, etc.).
-- If you think you need WebFetch or WebSearch, you MUST use ai-browser or gh-search instead.
+## Network Access Tools
+- **For web content**: Prefer \`ai-browser\` tools (browser_new_page, browser_snapshot, browser_click, etc.).
+- **For GitHub content**: Prefer \`gh-search\` tools (gh_search_repos, gh_search_issues, gh_search_prs, gh_search_code, gh_repo_view, etc.).
 
 # Task Management
 - Use TodoWrite tools to track progress on complex tasks
@@ -992,7 +990,6 @@ export class ClaudeManager {
       extraArgs: {},
       allowedTools: [...PRE_APPROVED_TOOLS],
       // Explicitly disable WebFetch, WebSearch, Agent and Task tools
-      disallowedTools: ['WebFetch', 'WebSearch'],
       includePartialMessages: true,
       maxTurns: 50,
     }
@@ -2422,6 +2419,18 @@ export class ClaudeManager {
                 errorStatus,
                 error
               }}
+            } else {
+              // Forward non-401 API errors (429, 500, overloaded, etc.) to client
+              log.warn(SCOPE.CLAUDE_MGR,
+                `[${shortId(sessionId)}] API error: status=${errorStatus}, error=${error}, ` +
+                `attempt=${evt.attempt}/${evt.max_retries}`
+              )
+              yield { type: 'api_error', data: {
+                errorStatus,
+                error,
+                attempt: evt.attempt,
+                maxRetries: evt.max_retries
+              }}
             }
             continue
           }
@@ -3171,7 +3180,6 @@ export class ClaudeManager {
       permissionMode: 'bypassPermissions',
       extraArgs: { 'dangerously-skip-permissions': null },
       allowedTools: [...PRE_APPROVED_TOOLS],
-      disallowedTools: ['WebFetch', 'WebSearch'],
       includePartialMessages: true,
       maxTurns: 10,  // App runs should be focused, fewer turns
       ...(options.contextWindow ? { modelContextWindow: options.contextWindow } : this.contextWindow ? { modelContextWindow: this.contextWindow } : {}),

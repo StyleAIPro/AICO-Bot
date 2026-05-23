@@ -47,6 +47,7 @@ export interface ServerMessage {
     | 'claude:stream'
     | 'claude:complete'
     | 'claude:error'
+    | 'claude:api-warning'
     | 'claude:session'
     | 'claude:usage'
     | 'claude:context-usage'

@@ -686,6 +686,27 @@ export async function executeRemoteMessage(
       }
     });
 
+    // API warning — non-fatal API errors (429, 500, overloaded) forwarded from proxy
+    // Show as a system thought in the thinking process timeline (same pattern as local auth retry)
+    addHandler('claude:api-warning', (data) => {
+      if (matchesTurn(data)) {
+        const warningData = data.data;
+        log.warn(`API warning (remote): ${warningData?.error}`);
+        const warningThought: any = {
+          id: `thought-api-warning-${Date.now()}`,
+          type: 'system',
+          content: warningData?.isAuthRetry
+            ? `API 错误 (${warningData.errorStatus}): ${warningData.error} — 正在重试认证...`
+            : `API 错误 (${warningData.errorStatus}): ${warningData.error}`,
+          timestamp: new Date().toISOString(),
+        };
+        sessionState.thoughts.push(warningThought);
+        sendToRenderer('agent:thought', spaceId, conversationId, {
+          thought: warningThought,
+        });
+      }
+    });
+
     // Text block start signal - for proper text block reset in frontend
     addHandler('text:block-start', (data) => {
       if (matchesTurn(data)) {
