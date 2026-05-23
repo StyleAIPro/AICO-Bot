@@ -281,7 +281,6 @@ export default function App() {
 
     // Message events (with session IDs)
     const unsubMessage = api.onAgentMessage((data) => {
-      console.log('[App] Received agent:message event:', data);
       handleAgentMessage(data as AgentEventBase & { content: string; isComplete: boolean });
     });
 
