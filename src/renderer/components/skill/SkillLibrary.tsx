@@ -390,22 +390,28 @@ export function SkillLibrary() {
 
     if (isElectron()) {
       try {
+        console.log('[SkillImport] handleImportFromZip: opening dialog...');
         const filePaths = await window.aicoBot.showOpenDialog({
           title: t('Select ZIP file'),
           filters: [{ name: 'ZIP', extensions: ['zip'] }],
           properties: ['openFile'],
         });
 
+        console.log('[SkillImport] dialog result:', filePaths);
         if (!filePaths || filePaths.length === 0) return;
 
+        const filePath = filePaths[0];
+        console.log('[SkillImport] calling skillImportSkills with sourceType=zip, filePath=', filePath);
         setImporting(true);
         const result = await window.aicoBot.skillImportSkills({
           sourceType: 'zip',
-          filePath: filePaths[0],
+          filePath,
         });
 
+        console.log('[SkillImport] IPC result:', JSON.stringify(result));
         if (result?.success && result.data) {
           const { installed, skipped, errors } = result.data;
+          console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
           if (installed.length > 0) {
             console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
           }
@@ -416,9 +422,11 @@ export function SkillLibrary() {
             console.error(`Errors: ${errors.join('; ')}`);
           }
           refreshSkills();
+        } else {
+          console.warn('[SkillImport] result not success or no data:', result);
         }
       } catch (err) {
-        console.error('Import from ZIP failed:', err);
+        console.error('[SkillImport] Import from ZIP failed:', err);
       } finally {
         setImporting(false);
       }
@@ -432,21 +440,27 @@ export function SkillLibrary() {
     if (importing) return;
 
     try {
+      console.log('[SkillImport] handleImportFromFolder: opening dialog...');
       const dirPaths = await window.aicoBot.showOpenDialog({
         title: t('Select folder containing skills'),
         properties: ['openDirectory'],
       });
 
+      console.log('[SkillImport] dialog result:', dirPaths);
       if (!dirPaths || dirPaths.length === 0) return;
 
+      const dirPath = dirPaths[0];
+      console.log('[SkillImport] calling skillImportSkills with sourceType=folder, filePath=', dirPath);
       setImporting(true);
       const result = await window.aicoBot.skillImportSkills({
         sourceType: 'folder',
-        filePath: dirPaths[0],
+        filePath: dirPath,
       });
 
+      console.log('[SkillImport] IPC result:', JSON.stringify(result));
       if (result?.success && result.data) {
         const { installed, skipped, errors } = result.data;
+        console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
         if (installed.length > 0) {
           console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
         }
@@ -457,6 +471,8 @@ export function SkillLibrary() {
           console.error(`Errors: ${errors.join('; ')}`);
         }
         refreshSkills();
+      } else {
+        console.warn('[SkillImport] result not success or no data:', result);
       }
     } catch (err) {
       console.error('Import from folder failed:', err);
@@ -471,10 +487,13 @@ export function SkillLibrary() {
 
     setImporting(true);
     try {
+      console.log('[SkillImport] handleZipFileChange: uploading file=', file.name, 'size=', file.size);
       const result = await api.skillImportFromZip(file);
 
+      console.log('[SkillImport] HTTP result:', JSON.stringify(result));
       if (result?.success && result.data) {
         const { installed, skipped, errors } = result.data;
+        console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
         if (installed.length > 0) {
           console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
         }
@@ -485,6 +504,8 @@ export function SkillLibrary() {
           console.error(`Errors: ${errors.join('; ')}`);
         }
         refreshSkills();
+      } else {
+        console.warn('[SkillImport] result not success or no data:', result);
       }
     } catch (err) {
       console.error('Import from ZIP failed:', err);

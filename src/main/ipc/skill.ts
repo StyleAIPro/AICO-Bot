@@ -74,10 +74,19 @@ export function registerSkillHandlers(conversationService: ConversationService):
   wrapIpcHandle(
     'skill:import-skills',
     async (event, input: { sourceType: 'zip' | 'folder'; filePath: string }) => {
+      console.log('[IPC:skill:import-skills] received:', JSON.stringify(input));
       const onOutput = (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => {
+        console.log('[IPC:skill:import-skills] onOutput:', data.type, data.content);
         event.sender.send('skill:install-output', 'import-skills', data);
       };
-      return skillController.importSkills(input.sourceType, input.filePath, onOutput);
+      try {
+        const result = await skillController.importSkills(input.sourceType, input.filePath, onOutput);
+        console.log('[IPC:skill:import-skills] controller result:', JSON.stringify(result));
+        return result;
+      } catch (err) {
+        console.error('[IPC:skill:import-skills] error:', err);
+        throw err;
+      }
     },
   );
 

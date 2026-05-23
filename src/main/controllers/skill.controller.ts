@@ -615,24 +615,30 @@ export async function importSkills(
   onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
 ): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
   try {
+    console.log('[Controller:importSkills] sourceType:', sourceType, 'filePath:', filePath);
     await ensureInitialized();
     const skillManager = SkillManager.getInstance();
 
     const onProgress = (message: string) => {
+      console.log('[Controller:importSkills] progress:', message);
       onOutput?.({ type: 'stdout', content: message });
     };
 
     let result: ImportSkillsResult;
     if (sourceType === 'zip') {
+      console.log('[Controller:importSkills] calling installFromZip...');
       result = await skillManager.installFromZip(filePath, onProgress);
     } else {
+      console.log('[Controller:importSkills] calling installFromDirectory...');
       result = await skillManager.installFromDirectory(filePath, onProgress);
     }
 
+    console.log('[Controller:importSkills] result:', JSON.stringify(result));
     await syncSkillStateToSdk();
 
     return { success: true, data: result };
   } catch (err) {
+    console.error('[Controller:importSkills] error:', err);
     return {
       success: false,
       error: err instanceof Error ? err.message : 'Unknown error',
