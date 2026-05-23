@@ -34,4 +34,12 @@ if [ -d "$DEPLOY_DIR/node_modules/@anthropic-ai" ] && [ ! -L "$GLOBAL_NODE_MODUL
   }
 fi
 
+# Fix vendor binary permissions (ripgrep, etc.)
+# npm pack strips execute permissions; these must be restored on deployment.
+VENDOR_BIN_DIR="$DEPLOY_DIR/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep"
+if [ -d "$VENDOR_BIN_DIR" ]; then
+  chmod +x "$VENDOR_BIN_DIR"/*/rg 2>/dev/null || true
+  echo "[deploy-env] Restored execute permission for vendor binaries"
+fi
+
 echo "[deploy-env] Environment ready. DEPLOY_DIR=$DEPLOY_DIR"

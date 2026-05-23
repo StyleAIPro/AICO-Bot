@@ -956,8 +956,26 @@ export class RemoteAgentServer {
           )) {
             // Auth retry detected — signal for session rebuild after stream ends
             if (chunk.type === 'auth_retry_required') {
+              // Notify client about the auth error before silent retry
+              sendEvent('claude:api-warning', {
+                error: `API 认证失败 (HTTP ${chunk.data.errorStatus}): ${chunk.data.error}`,
+                errorStatus: chunk.data.errorStatus,
+                isAuthRetry: true,
+                attempt: chunk.data.attempt,
+                maxRetries: chunk.data.maxRetries
+              })
               needsAuthRetry = true
-              continue  // Don't forward to client
+              continue
+            }
+            // Non-401 API errors — forward to client immediately
+            if (chunk.type === 'api_error') {
+              sendEvent('claude:api-warning', {
+                error: `API 错误 (HTTP ${chunk.data.errorStatus}): ${chunk.data.error}`,
+                errorStatus: chunk.data.errorStatus,
+                attempt: chunk.data.attempt,
+                maxRetries: chunk.data.maxRetries
+              })
+              continue
             }
             if (chunk.type === 'text') {
               accumulatedText += chunk.data?.text || ''

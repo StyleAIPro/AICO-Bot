@@ -17,7 +17,7 @@
  *      (called automatically by bootstrap and build scripts)
  */
 
-import { readFileSync, writeFileSync, existsSync } from 'fs'
+import { readFileSync, writeFileSync, existsSync, chmodSync, readdirSync } from 'fs'
 import { join, dirname } from 'path'
 import { fileURLToPath } from 'url'
 
@@ -32,6 +32,28 @@ const sdkPath = join(
   'claude-agent-sdk',
   'sdk.mjs',
 )
+
+// Fix ripgrep binary permissions — npm packages ship without +x,
+// which breaks Grep tool on Linux/macOS remote servers.
+// Windows is unaffected (no Unix permission bits).
+if (existsSync(sdkPath)) {
+  try {
+    const rgDir = join(rootDir, 'node_modules', '@anthropic-ai', 'claude-agent-sdk', 'vendor', 'ripgrep')
+    if (existsSync(rgDir)) {
+      for (const entry of readdirSync(rgDir, { withFileTypes: true })) {
+        if (entry.isDirectory()) {
+          const rgBin = join(rgDir, entry.name, 'rg')
+          if (existsSync(rgBin)) {
+            chmodSync(rgBin, 0o755)
+          }
+        }
+      }
+      console.log('[patch-sdk] Fixed ripgrep binary permissions (chmod 755)')
+    }
+  } catch {
+    // Non-critical — Windows or permission issues, silently skip
+  }
+}
 
 if (!existsSync(sdkPath)) {
   console.log('[patch-sdk] SDK not found, skipping patch')

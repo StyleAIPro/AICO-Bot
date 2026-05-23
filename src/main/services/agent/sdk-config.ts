@@ -159,8 +159,14 @@ export async function resolveCredentialsForSdk(
       return resolveAnthropicPassthrough(credentials);
     }
     // Direct path (PROXY_ANTHROPIC = false)
+    // SDK appends /v1/messages to base URL — strip if user included it
+    const cleanBase = (credentials.baseUrl || '').replace(/\/+$/, '')
+      .replace(/\/v\/?messages$/, '')
+      .replace(/\/v\/?message$/, '')
+      .replace(/\/messages$/, '')
+      .replace(/\/message$/, '');
     return {
-      anthropicBaseUrl: credentials.baseUrl,
+      anthropicBaseUrl: cleanBase,
       anthropicApiKey: credentials.apiKey,
       sdkModel: credentials.model || 'claude-opus-4-5-20251101',
       displayModel,
@@ -212,8 +218,12 @@ export async function resolveCredentialsForSdk(
  */
 function detectNativeAnthropic(baseUrl?: string): boolean {
   if (!baseUrl) return true;
-  if (baseUrl.includes('api.anthropic.com')) return true;
-  if (baseUrl.includes('/anthropic')) return true;
+  // Normalize trailing slash for consistent matching
+  const normalized = baseUrl.replace(/\/+$/, '');
+  if (normalized.includes('api.anthropic.com')) return true;
+  if (normalized.includes('/anthropic')) return true;
+  if (normalized.endsWith('/v1/messages') || normalized.endsWith('/v1/message') ||
+      normalized.endsWith('/messages') || normalized.endsWith('/message')) return true;
   return false;
 }
 
@@ -229,7 +239,14 @@ async function resolveAnthropicPassthrough(
 
   // 确保 baseUrl 存在，如果不存在则使用默认值
   const baseUrl = credentials.baseUrl || 'https://api.anthropic.com';
-  const configUrl = baseUrl.replace(/\/+$/, '') + '/v1/messages';
+  // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
+  // Strip these suffixes if user included them to avoid duplication.
+  const cleanUrl = baseUrl.replace(/\/+$/, '')
+    .replace(/\/v\/?messages$/, '')
+    .replace(/\/v\/?message$/, '')
+    .replace(/\/messages$/, '')
+    .replace(/\/message$/, '');
+  const configUrl = cleanUrl + '/v1/messages';
 
   const anthropicApiKey = encodeBackendConfig({
     url: configUrl,

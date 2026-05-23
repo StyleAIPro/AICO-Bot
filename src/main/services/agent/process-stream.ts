@@ -1074,10 +1074,10 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       if (subtype === 'api_retry') {
         const errorStatus = msg.error_status as number | undefined;
         const error = msg.error as string | undefined;
+        const attempt = msg.attempt as number | undefined;
+        const maxRetries = msg.max_retries as number | undefined;
         if (errorStatus === 401 && error === 'authentication_failed') {
           detectedAuthRetry = true;
-          const attempt = msg.attempt as number | undefined;
-          const maxRetries = msg.max_retries as number | undefined;
           console.warn(
             `[Agent][${conversationId}] SDK auth retry detected: attempt=${attempt ?? '?'}/${maxRetries ?? '?'}, ` +
               `error_status=${errorStatus}, error=${error} — will refresh credentials after SDK finishes retrying`,
@@ -1091,6 +1091,19 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
           };
           sessionState.thoughts.push(authRetryThought);
           emit('agent:thought', { thought: authRetryThought });
+        } else {
+          // Forward non-401 API errors (429, 500, overloaded, etc.) to user
+          console.warn(
+            `[Agent][${conversationId}] API error: status=${errorStatus}, error=${error}, attempt=${attempt ?? '?'}/${maxRetries ?? '?'}`,
+          );
+          const apiErrorThought: Thought = {
+            id: `thought-api-warning-${Date.now()}`,
+            type: 'system',
+            content: `API 错误 (${errorStatus ?? '?'}): ${error ?? 'unknown'}`,
+            timestamp: new Date().toISOString(),
+          };
+          sessionState.thoughts.push(apiErrorThought);
+          emit('agent:thought', { thought: apiErrorThought });
         }
         continue;
       }

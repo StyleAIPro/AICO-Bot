@@ -116,7 +116,8 @@ function getUpstreamError(status: number, errorText: string): { type: string; me
 function sendError(
   res: ExpressResponse,
   errorType: string,
-  message: string
+  message: string,
+  retryAfter?: string
 ): void {
   const status = ERROR_STATUS_MAP[errorType] || 500
   log.info('RequestHandler', `Sending error: HTTP ${status} ${errorType} - ${message.slice(0, 100)}`)
@@ -124,7 +125,9 @@ function sendError(
   res.status(status)
   res.setHeader('Content-Type', 'application/json')
   res.setHeader('request-id', `req_${Date.now()}`)
-  res.setHeader('retry-after', '3')
+  if (retryAfter) {
+    res.setHeader('retry-after', retryAfter)
+  }
   res.json({
     type: 'error',
     error: { type: errorType, message }
@@ -299,8 +302,6 @@ async function handleAnthropicPassthrough(
 
       res.status(upstreamResp.status)
       forwardResponseHeaders(upstreamResp, res)
-      // Business policy: override retry-after for faster client recovery
-      res.setHeader('retry-after', '3')
       res.end(errorText)
       return
     }
@@ -426,8 +427,10 @@ async function handleOpenAIConversion(
       // Handle errors - use upstream error type if available, else map from status
       if (!upstreamResp.ok) {
         const errorText = await upstreamResp.text().catch(() => '')
-        const { type: errorType, message: errorMessage } = getUpstreamError(upstreamResp.status, errorText)
-        log.error('RequestHandler', `Provider error ${upstreamResp.status}: ${errorText.slice(0, 200)}`)
+        const { message: errorMessage } = getUpstreamError(upstreamResp.status, errorText)
+        const errorType = getErrorTypeFromStatus(upstreamResp.status)
+        const retryAfter = upstreamResp.headers.get('retry-after') || undefined
+        log.error('RequestHandler', `Provider error ${upstreamResp.status} (${errorType}): ${errorText.slice(0, 200)}`)
 
         // Check if upstream requires stream=true, retry if needed
         const errorLower = errorText?.toLowerCase() || ''
@@ -450,12 +453,14 @@ async function handleOpenAIConversion(
 
           if (!upstreamResp.ok) {
             const retryErrorText = await upstreamResp.text().catch(() => '')
-            const { type: retryErrorType, message: retryErrorMessage } = getUpstreamError(upstreamResp.status, retryErrorText)
-            log.error('RequestHandler', `Provider error ${upstreamResp.status}: ${retryErrorText.slice(0, 200)}`)
-            return sendError(res, retryErrorType, retryErrorMessage)
+            const { message: retryErrorMessage } = getUpstreamError(upstreamResp.status, retryErrorText)
+            const retryErrorType = getErrorTypeFromStatus(upstreamResp.status)
+            const retryAfterRetry = upstreamResp.headers.get('retry-after') || undefined
+            log.error('RequestHandler', `Provider error ${upstreamResp.status} (${retryErrorType}): ${retryErrorText.slice(0, 200)}`)
+            return sendError(res, retryErrorType, retryErrorMessage, retryAfterRetry)
           }
         } else {
-          return sendError(res, errorType, errorMessage)
+          return sendError(res, errorType, errorMessage, retryAfter)
         }
       }
 

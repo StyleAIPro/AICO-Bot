@@ -13,10 +13,11 @@ import {
   setAuthToken,
   clearAuthToken,
   getAuthToken,
+  getRemoteServerUrl,
 } from './transport';
 
 // Re-export onEvent for components that need to listen to IPC events
-export { onEvent } from './transport';
+export { onEvent, isElectron } from './transport';
 import type {
   HealthStatusResponse,
   HealthStateResponse,
@@ -2375,6 +2376,23 @@ export const api = {
       return window.aicoBot.skillInstall(input);
     }
     return httpRequest('POST', '/api/skills/install', input);
+  },
+
+  skillImportFromZip: async (file: File): Promise<
+    ApiResponse<{ installed: string[]; skipped: string[]; errors: string[] }>
+  > => {
+    if (isElectron()) {
+      throw new Error('Use window.aicoBot.skillImportSkills directly in Electron mode');
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getAuthToken();
+    const response = await fetch(`${getRemoteServerUrl()}/api/skills/import-from-zip`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    return response.json();
   },
 
   skillInstallMulti: async (input: {

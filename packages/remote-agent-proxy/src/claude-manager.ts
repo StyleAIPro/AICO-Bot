@@ -490,11 +490,9 @@ IMPORTANT: You must NEVER generate or guess URLs for the user unless you are con
 # Tools and Permissions
 You can use the following tools without requiring user approval: Read, Write, Edit, Grep, Glob, Bash, Skill
 
-## Network Access Tools Priority (CRITICAL)
-- **WebFetch and WebSearch are DISABLED** - Do not use these tools under any circumstances.
-- **For web content**: Always use \`ai-browser\` tools (browser_new_page, browser_snapshot, browser_click, etc.).
-- **For GitHub content**: Always use \`gh-search\` tools (gh_search_repos, gh_search_issues, gh_search_prs, gh_search_code, gh_repo_view, etc.).
-- If you think you need WebFetch or WebSearch, you MUST use ai-browser or gh-search instead.
+## Network Access Tools
+- **For web content**: Prefer \`ai-browser\` tools (browser_new_page, browser_snapshot, browser_click, etc.).
+- **For GitHub content**: Prefer \`gh-search\` tools (gh_search_repos, gh_search_issues, gh_search_prs, gh_search_code, gh_repo_view, etc.).
 
 # Task Management
 - Use TodoWrite tools to track progress on complex tasks
@@ -786,9 +784,14 @@ export class ClaudeManager {
     if (process.env.REMOTE_AGENT_API_TYPE === 'anthropic_passthrough') return 'anthropic'
     // No custom URL = default Anthropic
     if (!baseUrl) return 'anthropic'
+    // Normalize trailing slash for consistent matching
+    const normalized = baseUrl.replace(/\/+$/, '')
     // Known Anthropic URLs (including Dashscope Claude-as-a-Service /apps/anthropic)
-    if (baseUrl.includes('api.anthropic.com')) return 'anthropic'
-    if (baseUrl.includes('/anthropic')) return 'anthropic'
+    if (normalized.includes('api.anthropic.com')) return 'anthropic'
+    if (normalized.includes('/anthropic')) return 'anthropic'
+    // Anthropic standard endpoint: /v1/messages, /v1/message, /messages, /message
+    if (normalized.endsWith('/v1/messages') || normalized.endsWith('/v1/message') ||
+        normalized.endsWith('/messages') || normalized.endsWith('/message')) return 'anthropic'
     // Everything else is treated as OpenAI-compatible
     return 'openai_compat'
   }
@@ -987,7 +990,6 @@ export class ClaudeManager {
       extraArgs: {},
       allowedTools: [...PRE_APPROVED_TOOLS],
       // Explicitly disable WebFetch, WebSearch, Agent and Task tools
-      disallowedTools: ['WebFetch', 'WebSearch'],
       includePartialMessages: true,
       maxTurns: 50,
     }
@@ -1014,6 +1016,7 @@ export class ClaudeManager {
 
     // ── Route through OpenAI Compat Router for non-Anthropic backends ──
     const backendType = this.detectBackendType(effectiveBaseUrl)
+    console.log(`[ClaudeManager] detectBackendType: url="${effectiveBaseUrl}" -> ${backendType}`)
 
     if (backendType === 'openai_compat') {
       // Start local protocol translator (lazy, once per process lifetime)
@@ -1063,7 +1066,14 @@ export class ClaudeManager {
         options.env.ANTHROPIC_AUTH_TOKEN = effectiveApiKey
       }
       if (effectiveBaseUrl) {
-        options.env.ANTHROPIC_BASE_URL = effectiveBaseUrl
+        // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
+        // Strip these suffixes if user included them to avoid duplication.
+        const baseUrl = effectiveBaseUrl.replace(/\/+$/, '')
+          .replace(/\/v\/?messages$/, '')
+          .replace(/\/v\/?message$/, '')
+          .replace(/\/messages$/, '')
+          .replace(/\/message$/, '')
+        options.env.ANTHROPIC_BASE_URL = baseUrl
       }
       // Use the real model name — /anthropic endpoints (DashScope, Zhipu, etc.)
       logConversation(`RequestHandler: Anthropic passthrough baseUrl=${effectiveBaseUrl || 'default'} model=${effectiveModel || 'default'} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
@@ -2409,6 +2419,18 @@ export class ClaudeManager {
                 errorStatus,
                 error
               }}
+            } else {
+              // Forward non-401 API errors (429, 500, overloaded, etc.) to client
+              log.warn(SCOPE.CLAUDE_MGR,
+                `[${shortId(sessionId)}] API error: status=${errorStatus}, error=${error}, ` +
+                `attempt=${evt.attempt}/${evt.max_retries}`
+              )
+              yield { type: 'api_error', data: {
+                errorStatus,
+                error,
+                attempt: evt.attempt,
+                maxRetries: evt.max_retries
+              }}
             }
             continue
           }
@@ -3158,7 +3180,6 @@ export class ClaudeManager {
       permissionMode: 'bypassPermissions',
       extraArgs: { 'dangerously-skip-permissions': null },
       allowedTools: [...PRE_APPROVED_TOOLS],
-      disallowedTools: ['WebFetch', 'WebSearch'],
       includePartialMessages: true,
       maxTurns: 10,  // App runs should be focused, fewer turns
       ...(options.contextWindow ? { modelContextWindow: options.contextWindow } : this.contextWindow ? { modelContextWindow: this.contextWindow } : {}),

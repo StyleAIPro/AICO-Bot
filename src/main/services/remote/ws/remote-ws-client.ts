@@ -333,6 +333,11 @@ export class RemoteWsClient extends EventEmitter {
           this.emit('claude:error', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
+        case 'claude:api-warning':
+          log.warn(`[${this.config.serverId}] API warning:`, message.data);
+          this.emit('claude:api-warning', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
+          break;
+
         case 'claude:session':
           log.debug(
             `[${this.config.serverId}] Received SDK session_id:`,
