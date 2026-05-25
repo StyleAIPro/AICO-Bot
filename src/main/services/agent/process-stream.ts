@@ -1178,13 +1178,20 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
           subagentState.status = notifStatus === 'completed' ? 'completed' : 'failed';
           subagentState.isComplete = true;
 
+          if (notifStatus === 'failed') {
+            // Capture actual error detail for cleanup fallback (BUG-003 fix)
+            const errorDetail =
+              (msg.error as string) || (msg.summary as string) || 'Subagent task failed';
+            subagentState.lastError = errorDetail;
+          }
+
           if (!workerTag) {
             sendToRenderer('worker:completed', spaceId, rendererConvId, {
               agentId: subagentState.agentId,
               agentName: subagentState.agentName,
               taskId: notifTaskId,
               result: (msg.summary as string) || '',
-              error: notifStatus === 'failed' ? 'Subagent task failed' : undefined,
+              error: notifStatus === 'failed' ? subagentState.lastError : undefined,
               status: notifStatus === 'completed' ? ('completed' as const) : ('failed' as const),
             });
           }
@@ -1332,12 +1339,13 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   // Clean up any active subagents that didn't complete (interrupted/aborted streams)
   subagentStates.forEach((state, taskId) => {
     if (!state.isComplete) {
+      const errorDetail = state.lastError || (wasAborted ? 'Stopped by user' : 'Stream interrupted');
       sendToRenderer('worker:completed', spaceId, rendererConvId, {
         agentId: state.agentId,
         agentName: state.agentName,
         taskId,
         result: '',
-        error: wasAborted ? 'Stopped by user' : 'Stream interrupted',
+        error: errorDetail,
         status: 'failed',
       });
       console.debug(`[Agent][${conversationId}] Subagent ${taskId} cleaned up (stream ended)`);
@@ -1395,26 +1403,15 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
     return result;
   }
 
-  // Always send complete event to unblock frontend
-  // (unless suppressed for worker subtasks in Hyper Space)
-  if (!params.suppressComplete) {
-    emit('agent:complete', {
-      type: 'complete',
-      duration: 0,
-      tokenUsage,
-    });
-  }
-
-  // Determine if interrupted error should be sent
+  // Send error BEFORE complete to prevent race condition:
+  // handleAgentComplete is async (awaits backend reload), and its final set()
+  // would overwrite error:null if error arrived after complete.
   const getInterruptedErrorMessage = (): string | null => {
     if (finalContent) {
-      // Has content: user aborted shows friendly message, other interrupts show warning
-      if (wasAborted) return null; // CRITICAL: Don't show error when user stops with content
+      if (wasAborted) return null;
       return isInterrupted ? 'Model response interrupted unexpectedly.' : null;
     } else {
-      // No content: skip if already has error thought or user aborted
       if (hasErrorThought || wasAborted) return null;
-      // Max turns is a graceful SDK limit, not a crash — show a clear actionable message
       if (hadMaxTurnsReached) return 'Reached the maximum turn limit. Send a message to continue.';
       return isInterrupted
         ? 'Model response interrupted unexpectedly.'
@@ -1441,6 +1438,16 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
     });
   } else if (wasAborted) {
     console.debug(`[Agent][${conversationId}] User stopped - no error sent`);
+  }
+
+  // Always send complete event to unblock frontend
+  // (unless suppressed for worker subtasks in Hyper Space)
+  if (!params.suppressComplete) {
+    emit('agent:complete', {
+      type: 'complete',
+      duration: 0,
+      tokenUsage,
+    });
   }
 
   return result;

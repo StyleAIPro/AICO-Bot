@@ -1764,19 +1764,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // DEBUG: Log all incoming agent messages
-    console.log(
-      `[ChatStore] handleAgentMessage received for ${conversationId}, delta: ${delta?.substring(0, 20)}...`,
-    );
-
     set((state) => {
       const newSessions = new Map(state.sessions);
       const session = newSessions.get(conversationId);
-
-      // DEBUG: Log session state
-      console.log(
-        `[ChatStore] Session exists: ${!!session}, isGenerating: ${session?.isGenerating}, isStopping: ${session?.isStopping}`,
-      );
 
       // CRITICAL: Ignore events if not generating or if stopping
       // This prevents stale events from previous requests after interrupt
@@ -2158,6 +2148,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               // They will be cleared on the next user message (sendMessage).
               // CRITICAL: Do NOT clear thoughts here — ThoughtProcess relies on it
               // to display subagent collapsible groups after stream completion.
+              // CRITICAL: Preserve error/errorType if handleAgentError already set them
+              // during the async await above — prevents race condition where error is lost.
               newSessions.set(conversationId, {
                 ...currentSession,
                 isGenerating: false,
@@ -2168,8 +2160,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 compactInfo: null, // Clear temporary compact notification
                 pendingQuestion: null, // Clear pending question
                 pendingToolPermission: null, // Clear pending tool permission
-                error: null, // Clear session error — now persisted in message.error
-                errorType: null,
+                error: currentSession.error || null, // Preserve error if already set by handleAgentError
+                errorType: currentSession.errorType || null,
               });
             }
           }
@@ -2238,12 +2230,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       agentName?: string;
       thought: Thought;
     };
-    console.log(
-      `[ChatStore] handleAgentThought [${conversationId}]${agentId ? ` agent=${agentId}` : ''}:`,
-      thought.type,
-      thought.id,
-    );
-
     // Route to worker session if agentId is present
     if (agentId) {
       set((state) => {

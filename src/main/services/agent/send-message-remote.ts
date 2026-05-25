@@ -42,6 +42,7 @@ import {
   unregisterActiveSession,
 } from './session-manager';
 import { AicoBotMcpBridge } from '../remote/ws/aico-bot-mcp-bridge';
+import { classifyError } from './error-classifier';
 import { terminalGateway } from '../terminal/terminal-gateway';
 import { SkillManager } from '../skill/skill-manager';
 
@@ -1053,6 +1054,18 @@ export async function executeRemoteMessage(
       thoughts: hasThoughts ? accumulatedThoughts : undefined, // Keep already generated thoughts
       error: isAbort ? undefined : err.message, // Only show error if not user-initiated abort
     });
+
+    // Send error event to frontend before complete, so UI can display the error
+    // Without this, remote mode errors are only persisted in message.error and
+    // the session-level error state is never set, leaving the user with no UI feedback
+    if (!isAbort) {
+      const classified = classifyError(err);
+      sendToRenderer('agent:error', spaceId, conversationId, {
+        type: 'error',
+        errorType: classified.type === 'network' ? 'network' : 'runtime',
+        error: classified.userMessage || err.message || 'Unknown remote agent error',
+      });
+    }
 
     // CRITICAL: Send completion event to notify frontend to stop streaming and reload
     // This ensures the frontend knows the generation is complete and can display the final content

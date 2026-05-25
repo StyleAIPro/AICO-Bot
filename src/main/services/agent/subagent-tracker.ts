@@ -24,6 +24,7 @@ export interface SubagentState {
   description: string;
   status: 'running' | 'completed' | 'failed';
   isComplete: boolean;
+  lastError?: string;
   // Per-subagent streaming block state (isolated from parent's streamingBlocks)
   streamingBlocks: Map<
     number,

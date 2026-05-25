@@ -2,6 +2,8 @@
 
 | 日期 | 内容 | 指令人 | 触发来源 |
 |------|------|--------|---------|
+| 2026-05-25 | BUG-002：调整 `agent:error`/`agent:complete` 事件发送顺序（先发 error 再发 complete），防止 `handleAgentComplete` 异步 await 后覆盖 error；`handleAgentComplete` 的 `set()` 中保护已有 error 不被清空 — `src/main/services/agent/process-stream.ts`、`src/renderer/stores/chat.store.ts` — PRD: `prd/bugfix/agent/bugfix-agent-error-log-truncation-v1.md` | @misakamikoto | bugfix-agent-error-log-truncation-v1 |
+| 2026-05-25 | BUG-003：子 Agent `SubagentState` 增加 `lastError` 字段，`task_notification` 失败时记录实际错误详情，清理时优先使用 `lastError` 而非通用字符串 — `src/main/services/agent/subagent-tracker.ts`、`src/main/services/agent/process-stream.ts` — PRD: `prd/bugfix/agent/bugfix-agent-error-log-truncation-v1.md` | @misakamikoto | bugfix-agent-error-log-truncation-v1 |
 | 2026-04-22 | bugfix: Worker 内部 SDK 子 agent 不再发送 worker:started/completed 事件到前端，避免产生多余 Worker Tab（task_started/task_notification 处理增加 workerTag 判断） | @misakamikoto | bugfix-excessive-subagents-v2 |
 | 2026-05-18 | 新增 `ProxyConnectError` 自定义错误类（`proxy-fetch.ts`），代理 CONNECT 握手失败/超时时抛出该类，使路由器可区分代理配置错误与临时网络错误 | @misakamikoto | bugfix-proxy-connect-failed-v1 |
 | 2026-05-14 | 修复上下文用量永远为 0：从 SDK stream_event 的 `message_start` 和 `message_delta` 事件提取 token usage（`inputTokens > 0` guard），修复 handleAgentComplete 中 contextWindow 保护逻辑 | @misakamikoto | bugfix-context-usage-zero-v1 |

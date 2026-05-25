@@ -2,6 +2,8 @@
 
 | 日期 | 内容 | 指令人 | 触发来源 |
 |------|------|--------|---------|
+| 2026-05-25 | BUG-001：远程模式 catch 块补充 `agent:error` 事件发送（非 abort 错误在 `agent:complete` 前发送 `agent:error`，使用 `classifyError` 分类错误类型） — `src/main/services/agent/send-message-remote.ts` — PRD: `prd/bugfix/agent/bugfix-agent-error-log-truncation-v1.md` | @misakamikoto | bugfix-agent-error-log-truncation-v1 |
+|------|------|--------|---------|
 | 2026-05-13 | BUG-006：修复注入循环不保存用户消息导致回复错位——injection continuation 循环添加 addMessage 调用，持久化注入的 user 消息和 assistant placeholder，防止 updateLastMessage 覆盖上一个回复 — `src/main/services/agent/send-message-local.ts` | 用户 | bugfix-message-delivery-v1 |
 | 2026-05-13 | BUG-005：修复生成中发送消息竞态丢失——turn-boundary handler 改用 injection-start 事件确认移除；修复空闲后新建 session 模型不读指令——新建 session 添加 continuation prefix — `src/renderer/App.tsx`, `src/main/services/agent/send-message-local.ts` | 用户 | bugfix-message-delivery-v1 |
 | 2026-05-13 | BUG-004：修复中止后安全超时复用卡死会话——getOrCreateV2Session 增加 activeSessions 已 abort 检测，强制关闭卡死会话后创建新会话 — `src/main/services/agent/session-lifecycle.ts` | 用户 | bugfix-stuck-session-reuse-v1 |
