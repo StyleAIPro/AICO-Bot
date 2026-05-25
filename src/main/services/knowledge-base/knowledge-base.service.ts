@@ -30,11 +30,13 @@ let instance: KnowledgeBaseService | null = null;
 
 export function setKnowledgeBaseService(dbManager: DatabaseManager): void {
   instance = new KnowledgeBaseService(dbManager);
+  console.log('[KB] KnowledgeBaseService initialized');
 }
 
 export function getKnowledgeBaseService(): KnowledgeBaseService {
   if (!instance) {
-    throw new Error('KnowledgeBaseService not initialized. Call setKnowledgeBaseService() first.');
+    console.warn('[KB] getKnowledgeBaseService called but service not initialized');
+    throw new Error('not_ready');
   }
   return instance;
 }
@@ -92,6 +94,36 @@ const KB_MIGRATIONS = [
         CREATE INDEX IF NOT EXISTS idx_kb_sources_kb_id ON kb_sources(kb_id);
         CREATE INDEX IF NOT EXISTS idx_kb_conversations_kb_id ON kb_conversations(kb_id);
       `);
+    },
+  },
+  {
+    version: 2,
+    description: 'Create reflux history table (decoupled from source records)',
+    up(db: Database.Database): void {
+      db.exec(`
+        CREATE TABLE IF NOT EXISTS kb_reflux_history (
+          kb_id TEXT NOT NULL,
+          file_name TEXT NOT NULL,
+          refluxed_at TEXT NOT NULL,
+          PRIMARY KEY (kb_id, file_name)
+        );
+      `);
+    },
+  },
+  {
+    version: 3,
+    description: 'Add reflux columns to kb_sources',
+    up(db: Database.Database): void {
+      const cols = (db.prepare("PRAGMA table_info(kb_sources)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!cols.includes('reflux_status')) {
+        db.exec("ALTER TABLE kb_sources ADD COLUMN reflux_status TEXT NOT NULL DEFAULT 'pending'");
+      }
+      if (!cols.includes('refluxed_at')) {
+        db.exec("ALTER TABLE kb_sources ADD COLUMN refluxed_at TEXT");
+      }
+      if (!cols.includes('reflux_task_id')) {
+        db.exec("ALTER TABLE kb_sources ADD COLUMN reflux_task_id TEXT");
+      }
     },
   },
 ];
@@ -388,7 +420,27 @@ export class KnowledgeBaseService {
       .prepare('SELECT * FROM kb_sources WHERE kb_id = ? ORDER BY created_at DESC')
       .all(kbId) as Array<Record<string, unknown>>;
 
-    return rows.map(this.rowToSource);
+    const kbPath = this.getKbPath(kbId);
+    const historyStmt = this.db.prepare('SELECT refluxed_at FROM kb_reflux_history WHERE kb_id = ? AND file_name = ?');
+
+    return rows.map((row) => {
+      const source = this.rowToSource(row);
+      const history = historyStmt.get(kbId, source.storedName) as { refluxed_at: string } | undefined;
+      if (history) {
+        source.wasRefluxed = true;
+        const rawPath = path.join(kbPath, 'raw', source.storedName);
+        try {
+          const stat = fs.statSync(rawPath);
+          source.fileChanged = stat.mtimeMs > new Date(history.refluxed_at).getTime();
+        } catch {
+          source.fileChanged = true;
+        }
+      } else {
+        source.wasRefluxed = false;
+        source.fileChanged = false;
+      }
+      return source;
+    });
   }
 
   // ---------------------------------------------------------------------------
@@ -686,6 +738,151 @@ export class KnowledgeBaseService {
     const engine = await this.createWikiEngine(kbId);
     const retriever = new KbRetriever(engine);
     return retriever.retrieve(userMessage);
+  }
+
+  // ---------------------------------------------------------------------------
+  // Reflux (external agent upload - async)
+  // ---------------------------------------------------------------------------
+
+  async refluxSources(
+    kbId: string,
+    sourceIds: string[],
+    userAccount: string,
+    onProgress?: (current: number, total: number, fileName: string) => void,
+  ): Promise<{ success: number; failed: number; errors: string[] }> {
+    const result = { success: 0, failed: 0, errors: [] as string[] };
+    const REFLEX_API = 'http://aiinside.service.huawei.com:30013/aiinside/copilot/rest/v1/api/aico/file/flowback';
+
+    // Collect valid files
+    const uploadEntries: Array<{ sourceId: string; filePath: string; fileName: string }> = [];
+    for (const sourceId of sourceIds) {
+      const row = this.db.prepare('SELECT * FROM kb_sources WHERE id = ?').get(sourceId) as Record<string, unknown> | undefined;
+      if (!row) {
+        result.failed++;
+        result.errors.push(`Source ${sourceId} not found`);
+        continue;
+      }
+      const rawPath = path.join(this.getKbPath(kbId), 'raw', row.stored_name as string);
+      if (!fs.existsSync(rawPath)) {
+        result.failed++;
+        result.errors.push(`File not found: ${row.stored_name}`);
+        this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed' WHERE id = ?").run(sourceId);
+        continue;
+      }
+      uploadEntries.push({ sourceId, filePath: rawPath, fileName: row.stored_name as string });
+    }
+
+    if (uploadEntries.length === 0) {
+      onProgress?.(result.success + result.failed, sourceIds.length, '');
+      return result;
+    }
+
+    try {
+      // Batch upload: all files in one FormData
+      const form = new FormData();
+      form.append('req', JSON.stringify({ userAccount }));
+      for (const entry of uploadEntries) {
+        const fileBuffer = fs.readFileSync(entry.filePath);
+        form.append('files', new Blob([fileBuffer]), entry.fileName);
+      }
+
+      const response = await fetch(REFLEX_API, { method: 'POST', body: form });
+      const json = (await response.json()) as {
+        resultCode?: string;
+        resultMessage?: string;
+        data?: { tasks: Array<{ taskId: string; fileName: string }>; failedFiles: unknown[] };
+      };
+
+      if (json.resultCode === '0' && json.data?.tasks) {
+        const taskMap = new Map(json.data.tasks.map((t) => [t.fileName, t.taskId]));
+        for (const entry of uploadEntries) {
+          const taskId = taskMap.get(entry.fileName);
+          if (taskId) {
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'processing', reflux_task_id = ? WHERE id = ?")
+              .run(taskId, entry.sourceId);
+            result.success++;
+          } else {
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed' WHERE id = ?").run(entry.sourceId);
+            result.failed++;
+            result.errors.push(`${entry.fileName}: no taskId returned`);
+          }
+          onProgress?.(result.success + result.failed, sourceIds.length, entry.fileName);
+        }
+      } else {
+        // Upload request itself failed
+        for (const entry of uploadEntries) {
+          this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed' WHERE id = ?").run(entry.sourceId);
+          result.failed++;
+        }
+        result.errors.push(json.resultMessage ?? 'Upload failed');
+        onProgress?.(result.success + result.failed, sourceIds.length, '');
+      }
+    } catch (err) {
+      for (const entry of uploadEntries) {
+        this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed' WHERE id = ?").run(entry.sourceId);
+        result.failed++;
+        result.errors.push(`${entry.fileName}: ${(err as Error).message}`);
+      }
+      onProgress?.(result.success + result.failed, sourceIds.length, '');
+    }
+
+    return result;
+  }
+
+  async pollRefluxStatus(kbId: string): Promise<{ updated: number; stillProcessing: number }> {
+    const STATUS_API = 'http://aiinside.service.huawei.com:30013/aiinside/copilot/rest/v1/api/aico/task/status';
+    const rows = this.db
+      .prepare("SELECT id, stored_name, reflux_task_id FROM kb_sources WHERE kb_id = ? AND reflux_status = 'processing' AND reflux_task_id IS NOT NULL")
+      .all(kbId) as Array<{ id: string; stored_name: string; reflux_task_id: string }>;
+
+    if (rows.length === 0) return { updated: 0, stillProcessing: 0 };
+
+    let updated = 0;
+    let stillProcessing = 0;
+
+    // Build taskId -> sourceId mapping
+    const taskToSource = new Map(rows.map((r) => [r.reflux_task_id, r]));
+    const taskIds = rows.map((r) => r.reflux_task_id);
+
+    try {
+      const resp = await fetch(STATUS_API, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ taskIds }),
+      });
+      const json = (await resp.json()) as {
+        resultCode?: string;
+        data?: Array<{ id: string; status: string; errorMessage?: string }>;
+      };
+
+      if (json.resultCode === '0' && json.data) {
+        for (const task of json.data) {
+          const source = taskToSource.get(task.id);
+          if (!source) continue;
+
+          const status = task.status.toUpperCase();
+          if (status === 'SUCCESS') {
+            const now = this.now();
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'success', refluxed_at = ?, reflux_task_id = NULL WHERE id = ?")
+              .run(now, source.id);
+            this.db.prepare("INSERT OR REPLACE INTO kb_reflux_history (kb_id, file_name, refluxed_at) VALUES (?, ?, ?)")
+              .run(kbId, source.stored_name, now);
+            updated++;
+          } else if (status === 'FAILED' || status === 'CANCELLED') {
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed', reflux_task_id = NULL WHERE id = ?").run(source.id);
+            updated++;
+          } else {
+            stillProcessing++;
+          }
+        }
+      } else {
+        stillProcessing = rows.length;
+      }
+    } catch {
+      stillProcessing = rows.length;
+    }
+
+    return { updated, stillProcessing };
   }
 
   // ---------------------------------------------------------------------------
@@ -1038,6 +1235,9 @@ export class KnowledgeBaseService {
       compiledAt: row.compiled_at as string | null,
       metadataJson: row.metadata_json as string,
       createdAt: row.created_at as string,
+      refluxStatus: (row.reflux_status as string) ?? 'pending',
+      refluxedAt: (row.refluxed_at as string) ?? null,
+      fileChanged: false,
     };
   }
 }

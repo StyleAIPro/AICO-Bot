@@ -21,6 +21,10 @@ import {
   KB_IMPORT_FOLDER,
   KB_REMOVE_SOURCE,
   KB_LIST_SOURCES,
+  KB_REFLEX_SOURCES,
+  KB_POLL_REFLEX_STATUS,
+  KB_EVENT_REFLEX_PROGRESS,
+  KB_EVENT_REFLEX_STATUS_UPDATE,
   KB_SAVE_CONVERSATION,
   KB_LIST_CONVERSATIONS,
   KB_INGEST,
@@ -61,6 +65,10 @@ export function registerKnowledgeBaseHandlers(): void {
   // Per-kbId abort controllers for cancellation
   const activeControllers = new Map<string, AbortController>();
 
+  function getKbSvc() {
+    return getKnowledgeBaseService();
+  }
+
   function sendProgress(data: { current: number; total: number; fileName: string; sourceId?: string; completedSourceId?: string }): void {
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send(KB_EVENT_INGEST_PROGRESS, data);
@@ -70,8 +78,8 @@ export function registerKnowledgeBaseHandlers(): void {
   // === KB CRUD ===
 
   wrapIpcHandle(KB_LIST, async () => {
+    const svc = getKbSvc();
     try {
-      const svc = getKnowledgeBaseService();
       const data = svc.listKnowledgeBases();
       return { success: true, data };
     } catch (error: unknown) {
@@ -82,7 +90,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_GET, async (_event, id: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.getKnowledgeBase(id);
       return { success: true, data };
     } catch (error: unknown) {
@@ -93,7 +102,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_CREATE, async (_event, input: CreateKnowledgeBaseInput) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.createKnowledgeBase(input);
       return { success: true, data };
     } catch (error: unknown) {
@@ -104,7 +114,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_UPDATE, async (_event, id: string, updates: Partial<CreateKnowledgeBaseInput>) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.updateKnowledgeBase(id, updates);
       return { success: true, data };
     } catch (error: unknown) {
@@ -115,7 +126,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_DELETE, async (_event, id: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.deleteKnowledgeBase(id);
       return { success: true };
     } catch (error: unknown) {
@@ -128,7 +140,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_IMPORT_FILES, async (_event, kbId: string, filePaths: string[]) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.importFiles(kbId, filePaths);
       return { success: true, data };
     } catch (error: unknown) {
@@ -139,7 +152,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_IMPORT_FOLDER, async (_event, kbId: string, folderPath: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.importFolder(kbId, folderPath);
       return { success: true, data };
     } catch (error: unknown) {
@@ -150,7 +164,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_REMOVE_SOURCE, async (_event, kbId: string, sourceId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.removeSource(kbId, sourceId);
       return { success: true };
     } catch (error: unknown) {
@@ -161,8 +176,45 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_LIST_SOURCES, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.listSources(kbId);
+      return { success: true, data };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
+
+  wrapIpcHandle(KB_REFLEX_SOURCES, async (_event, kbId: string, sourceIds: string[], userAccount: string) => {
+    try {
+      const svc = getKbSvc();
+
+      if (mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(KB_EVENT_REFLEX_PROGRESS, { current: 0, total: sourceIds.length, fileName: '' });
+      }
+      const data = await svc.refluxSources(kbId, sourceIds, userAccount, (current, total, fileName) => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send(KB_EVENT_REFLEX_PROGRESS, { current, total, fileName });
+        }
+      });
+      return { success: true, data };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
+
+  // === Poll reflux status ===
+
+  wrapIpcHandle(KB_POLL_REFLEX_STATUS, async (_event, kbId: string) => {
+    try {
+      const svc = getKbSvc();
+
+      const data = await svc.pollRefluxStatus(kbId);
+      if (data.updated > 0 && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send(KB_EVENT_REFLEX_STATUS_UPDATE, { kbId });
+      }
       return { success: true, data };
     } catch (error: unknown) {
       const err = error as Error;
@@ -174,7 +226,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_SAVE_CONVERSATION, async (_event, kbId: string, spaceId: string, conversationId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.saveConversationToKb(kbId, spaceId, conversationId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -185,7 +238,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_LIST_CONVERSATIONS, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.listConversations(kbId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -198,7 +252,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_INGEST, async (_event, kbId: string, sourceId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.ingest(kbId, sourceId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -213,7 +268,8 @@ export function registerKnowledgeBaseHandlers(): void {
     const signal = controller.signal;
 
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const sources = svc.listSources(kbId);
 
       if (sources.length === 0) {
@@ -279,7 +335,8 @@ export function registerKnowledgeBaseHandlers(): void {
     const signal = controller.signal;
 
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const sources = svc.listSources(kbId);
       const toIngest = sources.filter((s) => s.status === 'pending');
 
@@ -346,7 +403,7 @@ export function registerKnowledgeBaseHandlers(): void {
       controller.abort();
       activeControllers.delete(kbId);
     }
-    const svc = getKnowledgeBaseService();
+    const svc = getKbSvc();
     svc.resetIngestingSources(kbId);
     return { success: true, data: null };
   });
@@ -357,7 +414,8 @@ export function registerKnowledgeBaseHandlers(): void {
     const signal = controller.signal;
 
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       console.log('[KB_RECOMPILE] Starting recompile, clearing generated content...');
       svc.clearGeneratedContent(kbId);
       console.log('[KB_RECOMPILE] Content cleared, resetting source statuses...');
@@ -418,7 +476,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_COMPILE, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.crossLinkAllPages(kbId);
       svc.recountPages(kbId);
       return { success: true, data: { indexRebuilt: true, crossLinksApplied: true } };
@@ -430,7 +489,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_QUERY, async (_event, kbId: string, question: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.query(kbId, question);
       return { success: true, data };
     } catch (error: unknown) {
@@ -441,7 +501,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_SAVE_QUERY, async (_event, kbId: string, question: string, answer: string, citedPages: string[]) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.saveQueryResult(kbId, question, answer, citedPages);
       return { success: true };
     } catch (error: unknown) {
@@ -452,7 +513,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_LINT, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.lint(kbId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -463,7 +525,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_GENERATE_REPORT, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.generateReport(kbId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -474,7 +537,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_LOAD_REPORT, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = await svc.loadReport(kbId);
       return { success: true, data: data ?? null };
     } catch (error: unknown) {
@@ -485,7 +549,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_AUDIT, async (_event, kbId: string, correction: AuditCorrection) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       await svc.audit(kbId, correction);
       return { success: true };
     } catch (error: unknown) {
@@ -498,7 +563,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_LIST_PAGES, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.listWikiPages(kbId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -509,7 +575,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_READ_PAGE, async (_event, kbId: string, pagePath: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.readWikiPage(kbId, pagePath);
       return { success: true, data };
     } catch (error: unknown) {
@@ -520,7 +587,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_READ_SOURCE, async (_event, kbId: string, sourceId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.readSourceFile(kbId, sourceId);
       return { success: true, data };
     } catch (error: unknown) {
@@ -531,7 +599,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_UPDATE_PAGE, async (_event, kbId: string, pagePath: string, content: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.updateWikiPage(kbId, pagePath, content);
       return { success: true };
     } catch (error: unknown) {
@@ -542,7 +611,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_GET_PAGE_LINKS, async (_event, kbId: string, pagePath: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.getPageLinks(kbId, pagePath);
       return { success: true, data };
     } catch (error: unknown) {
@@ -553,7 +623,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_DELETE_PAGE, async (_event, kbId: string, pagePath: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       svc.deleteWikiPage(kbId, pagePath);
       svc.clearReportCache(kbId);
       return { success: true };
@@ -565,7 +636,8 @@ export function registerKnowledgeBaseHandlers(): void {
 
   wrapIpcHandle(KB_OPEN_SOURCE_BROWSER, async (_event, kbId: string, sourceId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.readSourceFile(kbId, sourceId);
 
       const escaped = data.text
@@ -594,7 +666,8 @@ h1{font-size:18px;color:#0f3460;border-bottom:1px solid #0f3460;padding-bottom:0
 
   wrapIpcHandle(KB_OPEN_SOURCE_DEFAULT, async (_event, kbId: string, sourceId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const filePath = svc.getSourceFilePath(kbId, sourceId);
       await shell.openPath(filePath);
       return { success: true };
@@ -608,7 +681,8 @@ h1{font-size:18px;color:#0f3460;border-bottom:1px solid #0f3460;padding-bottom:0
 
   wrapIpcHandle(KB_GET_GRAPH, async (_event, kbId: string) => {
     try {
-      const svc = getKnowledgeBaseService();
+      const svc = getKbSvc();
+
       const data = svc.getGraphData(kbId);
       return { success: true, data };
     } catch (error: unknown) {

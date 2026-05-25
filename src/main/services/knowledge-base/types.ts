@@ -30,6 +30,10 @@ export interface KbSource {
   compiledAt: string | null;
   metadataJson: string;
   createdAt: string;
+  refluxStatus?: string;
+  refluxedAt?: string | null;
+  fileChanged?: boolean;
+  wasRefluxed?: boolean;
 }
 
 export interface KbConversation {

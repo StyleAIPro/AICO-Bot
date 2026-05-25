@@ -22,6 +22,9 @@ interface KbSource {
   fileSize: number;
   status: string;
   errorMessage: string;
+  refluxStatus?: string;
+  fileChanged?: boolean;
+  wasRefluxed?: boolean;
 }
 
 interface WikiPage {
@@ -45,6 +48,8 @@ interface KnowledgeBaseState {
   error: string | null;
   activeKnowledgeBaseIds: string[];
   ingestProgress: { current: number; total: number; fileName: string } | null;
+  refluxProgress: { current: number; total: number; fileName: string } | null;
+  refluxPollingTimer: ReturnType<typeof setTimeout> | null;
   ingestingKbId: string | null;
   wikiUpdatedCounter: number;
   pendingPageExpand: PendingPageExpand | null;
@@ -61,6 +66,7 @@ interface KnowledgeBaseState {
   importFiles: (kbId: string) => Promise<void>;
   importFolder: (kbId: string) => Promise<void>;
   removeSource: (kbId: string, sourceId: string) => Promise<void>;
+  stopRefluxPolling: () => void;
 
   loadWikiPages: (kbId: string) => Promise<void>;
   ingestAll: (kbId: string) => Promise<void>;
@@ -87,6 +93,8 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   error: null,
   activeKnowledgeBaseIds: [],
   ingestProgress: null,
+  refluxProgress: null,
+  refluxPollingTimer: null,
   ingestingKbId: null,
   wikiUpdatedCounter: 0,
   pendingPageExpand: null,
@@ -236,6 +244,60 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
     } catch (err: unknown) {
       set({ error: (err as Error).message, loadingAction: null, loading: false });
     }
+  },
+
+  refluxSources: async (kbId: string, sourceIds: string[], userAccount: string) => {
+    set({ loadingAction: 'reflux', loading: true, error: null, refluxProgress: null });
+    try {
+      const res = await kbApi.kbRefluxSources(kbId, sourceIds, userAccount);
+      if (res.success) {
+        await get().loadSources(kbId);
+        set({ loadingAction: null, loading: false });
+        get().startRefluxPolling(kbId);
+        return res.data as { success: number; failed: number; errors: string[] };
+      } else {
+        set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false });
+        return null;
+      }
+    } catch (err: unknown) {
+      set({ error: (err as Error).message, loadingAction: null, loading: false });
+      return null;
+    }
+  },
+
+  refluxPollingTimer: null as ReturnType<typeof setTimeout> | null,
+
+  stopRefluxPolling: () => {
+    const timer = get().refluxPollingTimer;
+    if (timer) {
+      clearTimeout(timer);
+      set({ refluxPollingTimer: null });
+    }
+  },
+
+  startRefluxPolling: (kbId: string) => {
+    if (get().refluxPollingTimer) {
+      clearTimeout(get().refluxPollingTimer);
+    }
+    const poll = async () => {
+      try {
+        const res = await kbApi.kbPollRefluxStatus(kbId);
+        if (res.success && res.data) {
+          const { stillProcessing } = res.data as { updated: number; stillProcessing: number };
+          await get().loadSources(kbId);
+          if (stillProcessing > 0) {
+            get().startRefluxPolling(kbId);
+          } else {
+            set({ refluxPollingTimer: null });
+          }
+        } else {
+          get().startRefluxPolling(kbId);
+        }
+      } catch {
+        get().startRefluxPolling(kbId);
+      }
+    };
+    set({ refluxPollingTimer: setTimeout(poll, 5000) });
   },
 
   loadWikiPages: async (kbId: string, skipLoadingActionClear = false) => {
@@ -501,6 +563,15 @@ if (typeof window !== 'undefined' && window.aicoBot) {
         state.loadWikiPages(state.currentKb.id, true);
       }
     }
-    useKnowledgeBaseStore.setState(updates);
+    useKnowledgeBase.setState(updates);
   });
+
+  // Subscribe to reflux progress events from main process
+  if (typeof window !== 'undefined' && window.aicoBot) {
+    window.aicoBot.onKbRefluxProgress((data) => {
+      useKnowledgeBaseStore.setState({
+        refluxProgress: data.total > 0 ? { current: data.current, total: data.total, fileName: data.fileName } : null,
+      });
+    });
+  }
 }

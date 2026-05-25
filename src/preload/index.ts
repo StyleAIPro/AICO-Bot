@@ -170,6 +170,8 @@ export interface AicoBotAPI {
   kbImportFolder: (kbId: string, folderPath: string) => Promise<IpcResponse>;
   kbRemoveSource: (kbId: string, sourceId: string) => Promise<IpcResponse>;
   kbListSources: (kbId: string) => Promise<IpcResponse>;
+  kbRefluxSources: (kbId: string, sourceIds: string[], userAccount: string) => Promise<IpcResponse>;
+  kbPollRefluxStatus: (kbId: string) => Promise<IpcResponse>;
   kbSaveConversation: (kbId: string, spaceId: string, conversationId: string) => Promise<IpcResponse>;
   kbListConversations: (kbId: string) => Promise<IpcResponse>;
   kbIngest: (kbId: string, sourceId: string) => Promise<IpcResponse>;
@@ -195,6 +197,8 @@ export interface AicoBotAPI {
   kbSelectFile: () => Promise<IpcResponse>;
   kbSelectFolder: () => Promise<IpcResponse>;
   onKbIngestProgress: (callback: (data: { current: number; total: number; fileName: string; sourceId?: string; completedSourceId?: string }) => void) => (() => void);
+  onKbRefluxProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) => (() => void);
+  onKbRefluxStatusUpdate: (callback: (data: { kbId: string }) => void) => (() => void);
 
   compactContext: (conversationId: string) => Promise<IpcResponse>;
   continueIdleTimeout: (conversationId: string) => Promise<IpcResponse>;
@@ -896,6 +900,10 @@ const api: AicoBotAPI = {
     ipcRenderer.invoke('knowledge-base:remove-source', kbId, sourceId),
   kbListSources: (kbId: string) =>
     ipcRenderer.invoke('knowledge-base:list-sources', kbId),
+  kbRefluxSources: (kbId: string, sourceIds: string[], userAccount: string) =>
+    ipcRenderer.invoke('knowledge-base:reflux-sources', kbId, sourceIds, userAccount),
+  kbPollRefluxStatus: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:poll-reflux-status', kbId),
   kbSaveConversation: (kbId: string, spaceId: string, conversationId: string) =>
     ipcRenderer.invoke('knowledge-base:save-conversation', kbId, spaceId, conversationId),
   kbListConversations: (kbId: string) =>
@@ -944,6 +952,10 @@ const api: AicoBotAPI = {
   kbSelectFolder: () => ipcRenderer.invoke('knowledge-base:select-folder'),
   onKbIngestProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) =>
     createEventListener('knowledge-base:ingest-progress', callback),
+  onKbRefluxProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) =>
+    createEventListener('knowledge-base:reflux-progress', callback),
+  onKbRefluxStatusUpdate: (callback: (data: { kbId: string }) => void) =>
+    createEventListener('knowledge-base:reflux-status-update', callback),
 
   compactContext: (conversationId) => ipcRenderer.invoke('agent:compact-context', conversationId),
   continueIdleTimeout: (conversationId) => ipcRenderer.invoke('agent:continue-idle-timeout', conversationId),

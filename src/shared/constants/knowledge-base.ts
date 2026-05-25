@@ -14,6 +14,8 @@ export const KB_IMPORT_FILES = 'knowledge-base:import-files';
 export const KB_IMPORT_FOLDER = 'knowledge-base:import-folder';
 export const KB_REMOVE_SOURCE = 'knowledge-base:remove-source';
 export const KB_LIST_SOURCES = 'knowledge-base:list-sources';
+export const KB_REFLEX_SOURCES = 'knowledge-base:reflux-sources';
+export const KB_POLL_REFLEX_STATUS = 'knowledge-base:poll-reflux-status';
 
 // Conversation precipitation
 export const KB_SAVE_CONVERSATION = 'knowledge-base:save-conversation';
@@ -54,3 +56,5 @@ export const KB_SELECT_FOLDER = 'knowledge-base:select-folder';
 // Events
 export const KB_EVENT_INGEST_PROGRESS = 'knowledge-base:ingest-progress';
 export const KB_EVENT_COMPILE_PROGRESS = 'knowledge-base:compile-progress';
+export const KB_EVENT_REFLEX_PROGRESS = 'knowledge-base:reflux-progress';
+export const KB_EVENT_REFLEX_STATUS_UPDATE = 'knowledge-base:reflux-status-update';

@@ -69,6 +69,20 @@ export async function kbListSources(kbId: string): Promise<ApiResponse> {
   return { success: false, error: 'Not available in web mode' };
 }
 
+export async function kbRefluxSources(kbId: string, sourceIds: string[], userAccount: string): Promise<ApiResponse> {
+  if (isElectron()) {
+    return window.aicoBot.kbRefluxSources(kbId, sourceIds, userAccount);
+  }
+  return { success: false, error: 'Not available in web mode' };
+}
+
+export async function kbPollRefluxStatus(kbId: string): Promise<ApiResponse> {
+  if (isElectron()) {
+    return window.aicoBot.kbPollRefluxStatus(kbId);
+  }
+  return { success: false, error: 'Not available in web mode' };
+}
+
 export async function kbSaveConversation(kbId: string, spaceId: string, conversationId: string): Promise<ApiResponse> {
   if (isElectron()) {
     return window.aicoBot.kbSaveConversation(kbId, spaceId, conversationId);
