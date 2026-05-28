@@ -21,13 +21,9 @@ import type {
   SubagentTask,
   SubagentTaskStatus,
   SubagentAnnouncement,
-  AgentRole,
-  ExecutionMode,
-  RoutingStrategy,
   AggregationStrategy,
 } from '../../../shared/types/hyper-space';
 import {
-  DEFAULT_ORCHESTRATION_CONFIG,
   createOrchestrationConfig,
 } from '../../../shared/types/hyper-space';
 import { getConversation, getMessageThoughts, updateLastMessage } from '../conversation.service';
@@ -302,7 +298,7 @@ class AgentOrchestrator extends EventEmitter {
                 : ('completed' as const),
           type: (w.config.type || 'local') as 'local' | 'remote',
           serverName: w.config.serverName,
-          task: w.config.name ? undefined : undefined,
+          task: undefined,
           childConversationId: childConvId,
         };
       });
@@ -853,8 +849,9 @@ class AgentOrchestrator extends EventEmitter {
         childConversationId,
       );
 
-      // Register this client for interrupt support
-      registerActiveClient(conversationId, client);
+      // Register this client under the child conversation so worker sessions do not overwrite
+      // each other when multiple remote workers run under the same parent conversation.
+      registerActiveClient(childConversationId, client);
 
       // Variables to track streaming content and thoughts
       let streamingContent = '';
@@ -1026,8 +1023,12 @@ class AgentOrchestrator extends EventEmitter {
         isStreaming: false,
       });
 
-      // Save session and update message (using MAIN conversation ID)
-      saveSessionId(spaceId, conversationId, 'remote-session');
+      // Save the real SDK session ID so later turns can resume remote worker context.
+      const latestWorkerSessionId =
+        this.workerSessionIds.get(childConversationId) || workerSdkSessionId;
+      if (latestWorkerSessionId) {
+        saveSessionId(spaceId, conversationId, latestWorkerSessionId);
+      }
 
       // Extract file changes summary from accumulated thoughts
       let metadata: { fileChanges?: any } | undefined;
@@ -1080,7 +1081,7 @@ class AgentOrchestrator extends EventEmitter {
           /* best effort */
         }
         try {
-          unregisterActiveClient(conversationId);
+          unregisterActiveClient(childConversationId);
         } catch (_) {
           /* best effort */
         }
@@ -1428,11 +1429,7 @@ class AgentOrchestrator extends EventEmitter {
     team: AgentTeam,
     params: { task: string; conversationId: string },
   ): Promise<SubagentTask[]> {
-    // First, ask the leader to analyze and route
-    const analysisPrompt = this.buildRoutingPrompt(team, params.task);
-
-    // For now, use simple keyword matching on capabilities
-    // TODO: Implement AI-based routing using leader agent
+    // TODO: Implement AI-based routing using leader agent (buildRoutingPrompt)
     const targetAgents = this.matchAgentsByCapabilities(team, params.task);
 
     if (targetAgents.length === 0) {
@@ -3326,7 +3323,7 @@ just complete the task normally — the orchestrator will collect your results a
     const worker = team.workers.find((w) => w.id === announcement.agentId);
     const workerName = worker?.config.name || announcement.agentId;
 
-    const msgType = announcement.status === 'completed' ? 'task_completed' : 'task_completed';
+    const msgType = announcement.status === 'completed' ? 'task_completed' : 'task_failed';
     const content =
       announcement.status === 'completed'
         ? `Worker "${workerName}" completed task ${announcement.taskId}${announcement.summary ? ': ' + announcement.summary : ''}`

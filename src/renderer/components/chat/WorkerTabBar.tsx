@@ -244,6 +244,7 @@ export function WorkerView({
               thoughts={worker.thoughts}
               isThinking={worker.isThinking}
               defaultExpanded
+              isWorkerView
             />
           </div>
         )}

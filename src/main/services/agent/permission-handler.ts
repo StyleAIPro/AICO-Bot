@@ -217,6 +217,7 @@ export function rejectAllPermissions(): void {
 const QUESTION_TIMEOUT_MS = 5 * 60 * 1000;
 
 interface PendingQuestionEntry {
+  conversationId: string;
   resolve: (answers: Record<string, string>) => void;
   reject: (reason?: unknown) => void;
   timeoutId: ReturnType<typeof setTimeout>;
@@ -245,8 +246,16 @@ export function rejectQuestion(id: string, reason?: string): boolean {
   return true;
 }
 
-export function rejectAllQuestions(): void {
+/**
+ * Reject pending questions.
+ * Used when stop generation is triggered or user sends a new message.
+ * When conversationId is provided, only that conversation's questions are rejected.
+ */
+export function rejectAllQuestions(conversationId?: string): void {
   for (const [id, entry] of pendingQuestions) {
+    if (conversationId && entry.conversationId !== conversationId) {
+      continue;
+    }
     clearTimeout(entry.timeoutId);
     entry.reject(new Error('Generation stopped'));
     pendingQuestions.delete(id);

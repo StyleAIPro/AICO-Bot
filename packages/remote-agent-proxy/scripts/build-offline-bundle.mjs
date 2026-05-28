@@ -72,15 +72,8 @@ console.log('='.repeat(60));
 // Ensure output directory exists
 fs.mkdirSync(outputDir, { recursive: true });
 
-// ===== Step 1: Clean and install production dependencies =====
-console.log('\n[1/6] Installing production dependencies...');
-execSync('npm install --production --legacy-peer-deps', {
-  cwd: rootDir,
-  stdio: 'inherit',
-});
-
-// ===== Step 2: Build TypeScript =====
-console.log('\n[2/6] Compiling TypeScript...');
+// ===== Step 1: Build TypeScript (must run before --production install removes tsc) =====
+console.log('\n[1/6] Compiling TypeScript...');
 try {
   execSync('node scripts/build-with-timestamp.js', {
     cwd: rootDir,
@@ -90,6 +83,13 @@ try {
   console.error('TypeScript build failed');
   process.exit(1);
 }
+
+// ===== Step 2: Install production dependencies only =====
+console.log('\n[2/6] Installing production dependencies...');
+execSync('npm install --production --legacy-peer-deps', {
+  cwd: rootDir,
+  stdio: 'inherit',
+});
 
 // ===== Step 3: Clean node_modules to reduce size =====
 console.log('\n[3/6] Cleaning node_modules...');

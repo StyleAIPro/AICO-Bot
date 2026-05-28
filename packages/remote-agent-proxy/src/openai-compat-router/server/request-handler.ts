@@ -13,6 +13,7 @@
 
 import type { Response as ExpressResponse } from 'express'
 import type { AnthropicRequest, BackendConfig } from '../types'
+import type { LogEntry } from './router'
 import {
   convertAnthropicToOpenAIChat,
   convertAnthropicToOpenAIResponses,
@@ -27,6 +28,7 @@ import { getApiTypeFromUrl, isValidEndpointUrl, getEndpointUrlError, shouldForce
 import { withRequestQueue, generateQueueKey } from './request-queue'
 import { runInterceptors } from '../interceptors'
 import { applyProviderAdapter } from './provider-adapters'
+import { log } from '../../logger.js'
 
 export interface RequestHandlerOptions {
   debug?: boolean
@@ -39,6 +41,8 @@ export interface RequestHandlerOptions {
   rawBody?: Buffer
   /** Whether interceptors modified the request (set internally) */
   requestModified?: boolean
+  /** Log callback for forwarding logs to WebSocket layer */
+  onLog?: (entry: LogEntry) => void
 }
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000 // 30 minutes
@@ -112,15 +116,18 @@ function getUpstreamError(status: number, errorText: string): { type: string; me
 function sendError(
   res: ExpressResponse,
   errorType: string,
-  message: string
+  message: string,
+  retryAfter?: string
 ): void {
   const status = ERROR_STATUS_MAP[errorType] || 500
-  console.log(`[RequestHandler] Sending error: HTTP ${status} ${errorType} - ${message.slice(0, 100)}`)
+  log.info('RequestHandler', `Sending error: HTTP ${status} ${errorType} - ${message.slice(0, 100)}`)
 
   res.status(status)
   res.setHeader('Content-Type', 'application/json')
   res.setHeader('request-id', `req_${Date.now()}`)
-  res.setHeader('retry-after', '3')
+  if (retryAfter) {
+    res.setHeader('retry-after', retryAfter)
+  }
   res.json({
     type: 'error',
     error: { type: errorType, message }
@@ -144,7 +151,7 @@ async function fetchUpstream(
 ): Promise<globalThis.Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => {
-    console.log('[RequestHandler] Request timeout, aborting...')
+    log.info('RequestHandler', 'Request timeout, aborting...')
     controller.abort()
   }, timeoutMs)
 
@@ -191,7 +198,7 @@ async function fetchAnthropicUpstream(
 ): Promise<globalThis.Response> {
   const controller = new AbortController()
   const timeout = setTimeout(() => {
-    console.log('[RequestHandler] Anthropic passthrough timeout, aborting...')
+    log.info('RequestHandler', 'Anthropic passthrough timeout, aborting...')
     controller.abort()
   }, timeoutMs)
 
@@ -270,8 +277,8 @@ async function handleAnthropicPassthrough(
   }
 
   const toolCount = anthropicRequest.tools?.length ?? 0
-  console.log(`[RequestHandler] Anthropic passthrough tools=${toolCount}`)
-  console.log(`[RequestHandler] POST ${targetUrl} (stream=${anthropicRequest.stream ?? false})`)
+  log.info('RequestHandler', `Anthropic passthrough tools=${toolCount}`)
+  log.info('RequestHandler', `POST ${targetUrl} (stream=${anthropicRequest.stream ?? false})`)
 
   // Use raw body buffer when neither interceptors nor model override modified the request.
   // This avoids a JSON.stringify round-trip — the upstream receives byte-identical body from SDK.
@@ -279,24 +286,22 @@ async function handleAnthropicPassthrough(
   const fetchBody: Buffer | unknown = canUseRawBody ? rawBody : anthropicRequest
 
   if (debug) {
-    console.log(`[RequestHandler] Raw body forwarding: ${canUseRawBody ? 'yes' : 'no (modified)'}`)
+    log.debug('RequestHandler', `Raw body forwarding: ${canUseRawBody ? 'yes' : 'no (modified)'}`)
   }
 
   try {
     const upstreamResp = await fetchAnthropicUpstream(
       targetUrl, apiKey, fetchBody, timeoutMs, sdkHeaders, customHeaders
     )
-    console.log(`[RequestHandler] Anthropic upstream response: ${upstreamResp.status}`)
+    log.info('RequestHandler', `Anthropic upstream response: ${upstreamResp.status}`)
 
     // Handle errors — forward upstream response transparently (status + headers + body)
     if (!upstreamResp.ok) {
       const errorText = await upstreamResp.text().catch(() => '')
-      console.error(`[RequestHandler] Anthropic error ${upstreamResp.status}: ${errorText.slice(0, 200)}`)
+      log.error('RequestHandler', `Anthropic error ${upstreamResp.status}: ${errorText.slice(0, 200)}`)
 
       res.status(upstreamResp.status)
       forwardResponseHeaders(upstreamResp, res)
-      // Business policy: override retry-after for faster client recovery
-      res.setHeader('retry-after', '3')
       res.end(errorText)
       return
     }
@@ -320,7 +325,7 @@ async function handleAnthropicPassthrough(
         }
       } catch (err: any) {
         if (err?.name !== 'AbortError') {
-          console.error('[RequestHandler] Anthropic stream pipe error:', err?.message)
+          log.error('RequestHandler', `Anthropic stream pipe error: ${err?.message}`)
         }
       } finally {
         res.end()
@@ -331,16 +336,16 @@ async function handleAnthropicPassthrough(
     // Non-streaming: forward JSON response as-is
     const body = await upstreamResp.text()
     if (debug) {
-      console.log(`[RequestHandler] Anthropic response:\n${body.slice(0, 2000)}`)
+      log.debug('RequestHandler', `Anthropic response:\n${body.slice(0, 2000)}`)
     }
     forwardResponseHeaders(upstreamResp, res)
     res.end(body)
   } catch (error: any) {
     if (error?.name === 'AbortError') {
-      console.error('[RequestHandler] Anthropic passthrough AbortError (timeout or client disconnect)')
+      log.error('RequestHandler', 'Anthropic passthrough AbortError (timeout or client disconnect)')
       return sendError(res, 'timeout_error', 'Request timed out')
     }
-    console.error('[RequestHandler] Anthropic passthrough error:', error?.message || error)
+    log.error('RequestHandler', `Anthropic passthrough error: ${error?.message || error}`)
     return sendError(res, 'api_error', error?.message || 'Internal error')
   }
 }
@@ -377,9 +382,9 @@ async function handleOpenAIConversion(
   }
 
   if (debug) {
-    console.log('[RequestHandler] Backend:', backendUrl)
-    console.log('[RequestHandler] API Key:', apiKey.slice(0, 8) + '...')
-    console.log('[RequestHandler] ApiType:', apiType)
+    log.debug('RequestHandler', `Backend: ${backendUrl}`)
+    log.debug('RequestHandler', `API Key: ${apiKey.slice(0, 8)}...`)
+    log.debug('RequestHandler', `ApiType: ${apiType}`)
   }
 
   // Use request queue to prevent concurrent requests
@@ -399,8 +404,8 @@ async function handleOpenAIConversion(
         : convertAnthropicToOpenAIChat(requestToSend).request
 
       const toolCount = (openaiRequest as any).tools?.length ?? 0
-      console.log(`[RequestHandler] wire=${apiType} tools=${toolCount}`)
-      console.log(`[RequestHandler] POST ${backendUrl} (stream=${wantStream ?? false})`)
+      log.info('RequestHandler', `wire=${apiType} tools=${toolCount}`)
+      log.info('RequestHandler', `POST ${backendUrl} (stream=${wantStream ?? false})`)
 
       // Build headers: start with custom headers from config
       const requestHeaders: Record<string, string> = { ...(customHeaders || {}) }
@@ -412,18 +417,20 @@ async function handleOpenAIConversion(
         requestHeaders
       )
       if (adapter && debug) {
-        console.log(`[RequestHandler] Applied provider adapter: ${adapter.name}`)
+        log.debug('RequestHandler', `Applied provider adapter: ${adapter.name}`)
       }
 
       // Make upstream request - URL is used directly, no modification
       let upstreamResp = await fetchUpstream(backendUrl, apiKey, openaiRequest, timeoutMs, undefined, requestHeaders)
-      console.log(`[RequestHandler] Upstream response: ${upstreamResp.status}`)
+      log.info('RequestHandler', `Upstream response: ${upstreamResp.status}`)
 
       // Handle errors - use upstream error type if available, else map from status
       if (!upstreamResp.ok) {
         const errorText = await upstreamResp.text().catch(() => '')
-        const { type: errorType, message: errorMessage } = getUpstreamError(upstreamResp.status, errorText)
-        console.error(`[RequestHandler] Provider error ${upstreamResp.status}: ${errorText.slice(0, 200)}`)
+        const { message: errorMessage } = getUpstreamError(upstreamResp.status, errorText)
+        const errorType = getErrorTypeFromStatus(upstreamResp.status)
+        const retryAfter = upstreamResp.headers.get('retry-after') || undefined
+        log.error('RequestHandler', `Provider error ${upstreamResp.status} (${errorType}): ${errorText.slice(0, 200)}`)
 
         // Check if upstream requires stream=true, retry if needed
         const errorLower = errorText?.toLowerCase() || ''
@@ -431,7 +438,7 @@ async function handleOpenAIConversion(
                                (errorLower.includes('non-stream') && errorLower.includes('not supported'))
 
         if (requiresStream && !wantStream) {
-          console.warn('[RequestHandler] Upstream requires stream=true, retrying...')
+          log.warn('RequestHandler', 'Upstream requires stream=true, retrying...')
 
           // Retry with stream enabled
           wantStream = true
@@ -446,12 +453,14 @@ async function handleOpenAIConversion(
 
           if (!upstreamResp.ok) {
             const retryErrorText = await upstreamResp.text().catch(() => '')
-            const { type: retryErrorType, message: retryErrorMessage } = getUpstreamError(upstreamResp.status, retryErrorText)
-            console.error(`[RequestHandler] Provider error ${upstreamResp.status}: ${retryErrorText.slice(0, 200)}`)
-            return sendError(res, retryErrorType, retryErrorMessage)
+            const { message: retryErrorMessage } = getUpstreamError(upstreamResp.status, retryErrorText)
+            const retryErrorType = getErrorTypeFromStatus(upstreamResp.status)
+            const retryAfterRetry = upstreamResp.headers.get('retry-after') || undefined
+            log.error('RequestHandler', `Provider error ${upstreamResp.status} (${retryErrorType}): ${retryErrorText.slice(0, 200)}`)
+            return sendError(res, retryErrorType, retryErrorMessage, retryAfterRetry)
           }
         } else {
-          return sendError(res, errorType, errorMessage)
+          return sendError(res, errorType, errorMessage, retryAfter)
         }
       }
 
@@ -472,7 +481,7 @@ async function handleOpenAIConversion(
       // Handle non-streaming response
       const openaiResponse = await upstreamResp.json()
       if (debug) {
-        console.log(`[RequestHandler] Response body:\n${JSON.stringify(openaiResponse, null, 2)}`)
+        log.debug('RequestHandler', `Response body:\n${JSON.stringify(openaiResponse, null, 2)}`)
       }
       const anthropicResponse = apiType === 'responses'
         ? convertOpenAIResponsesToAnthropic(openaiResponse)
@@ -482,11 +491,11 @@ async function handleOpenAIConversion(
     } catch (error: any) {
       // Handle abort/timeout
       if (error?.name === 'AbortError') {
-        console.error('[RequestHandler] AbortError (timeout or client disconnect)')
+        log.error('RequestHandler', 'AbortError (timeout or client disconnect)')
         return sendError(res, 'timeout_error', 'Request timed out')
       }
 
-      console.error('[RequestHandler] Internal error:', error?.message || error)
+      log.error('RequestHandler', `Internal error: ${error?.message || error}`)
       return sendError(res, 'api_error', error?.message || 'Internal error')
     }
   })
@@ -512,7 +521,10 @@ export async function handleMessagesRequest(
   options: RequestHandlerOptions = {}
 ): Promise<void> {
   const { url: backendUrl, apiType: configApiType } = config
-  console.log('[RequestHandler] handleMessagesRequest', backendUrl)
+  const { onLog } = options
+  const logMsg = `handleMessagesRequest apiType=${configApiType} target=${backendUrl} model=${anthropicRequest.model}`
+  log.info('RequestHandler', logMsg)
+  onLog?.({ level: 'info', message: logMsg, source: 'request-handler' })
 
   // Run interceptors on Anthropic-format request (before any conversion)
   const interceptResult = await runInterceptors(

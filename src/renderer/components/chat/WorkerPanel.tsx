@@ -89,7 +89,7 @@ export function WorkerPanel({ worker, onAnswerQuestion }: WorkerPanelProps) {
                 <span className="opacity-50">({worker.thoughts.length})</span>
               </button>
               {isThoughtExpanded && (
-                <ThoughtProcess thoughts={worker.thoughts} isThinking={worker.isThinking} />
+                <ThoughtProcess thoughts={worker.thoughts} isThinking={worker.isThinking} isWorkerView />
               )}
             </div>
           )}

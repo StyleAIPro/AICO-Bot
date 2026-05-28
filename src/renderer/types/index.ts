@@ -441,6 +441,11 @@ export interface Message {
     permissionRequestId?: string;
     requestingAgentName?: string;
     toolName?: string;
+    /** Skill invocation marker (displayed as /skill-name tag in chat) */
+    skillId?: string;
+    skillName?: string;
+    skillTrigger?: string;
+    skillDescription?: string;
   };
   error?: string; // Error message when assistant response failed (e.g., 429 rate limit)
 }

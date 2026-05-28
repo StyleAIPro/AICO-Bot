@@ -52,6 +52,7 @@ import {
   markSessionRequestStart,
   markSessionRequestComplete,
   activeSessions,
+  v2Sessions,
 } from './session-manager';
 import { formatCanvasContext, buildMessageContent } from './message-utils';
 import { resolveCredentialsForSdk, buildBaseSdkOptions } from './sdk-config';
@@ -284,6 +285,22 @@ export async function sendMessage(
     // Get conversation for session resumption
     const conversation = getConversation(spaceId, conversationId);
     const sessionId = resumeSessionId || conversation?.sessionId;
+
+    // Detect if previous assistant response was empty/interrupted.
+    // When auto-stop interrupts a generation, updateLastMessage may save an empty
+    // or thinking-only response. Non-Claude models (GLM etc.) then ignore the current
+    // message and re-respond to the previous unanswered one, causing off-by-one.
+    // We check messages[messages.length-3] because:
+    //   [messages.length-1] = new assistant_empty (added above at line 271)
+    //   [messages.length-2] = new user (added above at line 264)
+    //   [messages.length-3] = previous assistant (the one we want to check)
+    const convMsgs = conversation?.messages || [];
+    const prevAssistantMsg =
+      convMsgs.length >= 3
+        ? convMsgs[convMsgs.length - 3]
+        : null;
+    const hadEmptyPreviousResponse =
+      prevAssistantMsg?.role === 'assistant' && !prevAssistantMsg.content;
     // Use headless Electron binary (outside .app bundle on macOS to prevent Dock icon)
     const electronPath = getHeadlessElectronPath();
     console.log(`[Agent] Using headless Electron as Node runtime: ${electronPath}`);
@@ -403,6 +420,8 @@ export async function sendMessage(
     // Get or create persistent V2 session for this conversation
     // Pass config for rebuild detection when aiBrowserEnabled changes
     // Pass workDir for session migration support (from old ~/.claude to new config dir)
+    // Track whether session is being newly created (for message prefix)
+    const isNewSession = !v2Sessions.has(conversationId);
     let v2Session = await getOrCreateV2Session(spaceId, conversationId, {
       sdkOptions,
       sessionId,
@@ -454,7 +473,24 @@ export async function sendMessage(
     }
     const canvasPrefix = formatCanvasContext(canvasContext);
     const messageWithContext = canvasPrefix + message;
-    const messageContent = buildMessageContent(messageWithContext, images);
+    let messageContent = buildMessageContent(messageWithContext, images);
+
+    // Add continuation prefix to prevent off-by-one in two scenarios:
+    // 1. isNewSession: non-Claude models treat resumed session as "new conversation",
+    //    responding with a greeting instead of processing the user's actual message.
+    // 2. hadEmptyPreviousResponse: auto-stop interrupted the previous generation,
+    //    leaving an empty/thinking-only response. The model then ignores the current
+    //    message and re-responds to the previous unanswered one (e.g., docker results
+    //    appearing under "1+2+...+100" instead of "what containers are on the server").
+    const shouldAddContinuationPrefix = isNewSession || hadEmptyPreviousResponse;
+    if (shouldAddContinuationPrefix && typeof messageContent === 'string') {
+      const continuationPrefix =
+        '[System Note: 这是已有对话的延续，请直接回复用户的最新消息。]\n\n';
+      messageContent = continuationPrefix + messageContent;
+      console.log(
+        `[Agent][${conversationId}] Added continuation prefix (isNewSession=${isNewSession}, emptyPrevResp=${hadEmptyPreviousResponse})`,
+      );
+    }
 
     // Mark session request start for health tracking
     markSessionRequestStart(conversationId);
@@ -602,8 +638,36 @@ export async function sendMessage(
               `[Agent][${conversationId}] Continuing with injected message (cycle ${injectionCycles}): ${injection.content.slice(0, 50)}...`,
             );
 
+            // Persist injected user message and new assistant placeholder to DB.
+            // Without this, updateLastMessage for the injection response overwrites the
+            // previous assistant message, causing off-by-one in conversation history
+            // and losing the injected user message from the record entirely.
+            addMessage(spaceId, conversationId, {
+              role: 'user',
+              content: injection.content,
+              images: injection.images,
+            });
+            addMessage(spaceId, conversationId, {
+              role: 'assistant',
+              content: '',
+              toolCalls: [],
+            });
+
             // Build the injection message content
-            const injectionContent = buildMessageContent(injection.content, injection.images);
+            let injectionContent = buildMessageContent(injection.content, injection.images);
+
+            // Add continuation prefix for injected messages.
+            // When the model sees a previous empty/interrupted response, non-Claude models
+            // (GLM etc.) may ignore the injected message and re-respond to the previous one,
+            // causing off-by-one: docker results appear under "加法" instead of "容器".
+            if (typeof injectionContent === 'string') {
+              const continuationPrefix =
+                '[System Note: 这是已有对话的延续，请直接回复用户的最新消息。]\n\n';
+              injectionContent = continuationPrefix + injectionContent;
+              console.log(
+                `[Agent][${conversationId}] Added continuation prefix to injected message`,
+              );
+            }
 
             // Update current message content for next iteration
             currentMessageContent = injectionContent;
@@ -801,6 +865,27 @@ export async function sendMessage(
         errorMessage = mcpErrorMatch[0].trim();
       } else if (genericErrorMatch) {
         errorMessage = genericErrorMatch[0].trim();
+      }
+    }
+
+    // Enhance proxy-related errors with user-friendly messages
+    const proxyErrorPatterns: Array<[RegExp, string]> = [
+      [/Proxy CONNECT failed/i, 'Network proxy connection failed: unable to connect to the proxy server. Please check your proxy settings.'],
+      [/Proxy connection timed out/i, 'Proxy connection timed out: the proxy server did not respond within the timeout period. Please check your proxy settings.'],
+    ];
+    for (const [pattern, friendlyMessage] of proxyErrorPatterns) {
+      if (pattern.test(errorMessage)) {
+        errorMessage = `${friendlyMessage}\n\nTechnical details: ${err.message}`;
+        break;
+      }
+    }
+
+    // If proxy is configured and error is a common network failure, hint about proxy
+    if (!proxyErrorPatterns.some(([p]) => p.test(errorMessage))) {
+      const isNetworkError = /ECONNREFUSED|ETIMEDOUT|ENOTFOUND|ECONNRESET|EPIPE|UNABLE_TO_VERIFY_LEAF_SIGNATURE/.test(errorMessage);
+      const proxyUrl = getEffectiveProxyUrl();
+      if (isNetworkError && proxyUrl) {
+        errorMessage = `Network proxy connection failed: unable to connect to the proxy server. Please check your proxy settings.\n\nTechnical details: ${err.message}`;
       }
     }
 

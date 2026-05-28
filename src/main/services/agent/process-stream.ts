@@ -310,7 +310,6 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   // Token-level streaming state
   let currentStreamingText = ''; // Accumulates text_delta tokens
   let isStreamingTextBlock = false; // True when inside a text content block
-  const STREAM_THROTTLE_MS = 30; // Throttle updates to ~33fps
 
   // Track if SDK reported error_during_execution (for interrupted detection)
   let hadErrorDuringExecution = false;
@@ -769,6 +768,47 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
         }
       }
 
+      // ========== Extract token usage from stream events ==========
+      // message_start provides early input_tokens; message_delta provides final usage
+      if (event.type === 'message_start' && event.message?.usage) {
+        const usage = event.message.usage;
+        if (usage.input_tokens > 0) {
+          lastSingleUsage = {
+            inputTokens: usage.input_tokens || 0,
+            outputTokens: usage.output_tokens || 0,
+            cacheReadTokens: usage.cache_read_input_tokens || 0,
+            cacheCreationTokens: usage.cache_creation_input_tokens || 0,
+          };
+          emit('agent:context-usage', {
+            type: 'context-usage',
+            inputTokens: lastSingleUsage.inputTokens,
+            outputTokens: lastSingleUsage.outputTokens,
+            cacheReadTokens: lastSingleUsage.cacheReadTokens,
+            cacheCreationTokens: lastSingleUsage.cacheCreationTokens,
+            contextWindow: params.contextWindow,
+          });
+        }
+      }
+      if (event.type === 'message_delta' && event.usage) {
+        const usage = event.usage;
+        if (usage.input_tokens > 0) {
+          lastSingleUsage = {
+            inputTokens: usage.input_tokens || 0,
+            outputTokens: usage.output_tokens || 0,
+            cacheReadTokens: usage.cache_read_input_tokens || 0,
+            cacheCreationTokens: usage.cache_creation_input_tokens || 0,
+          };
+          emit('agent:context-usage', {
+            type: 'context-usage',
+            inputTokens: lastSingleUsage.inputTokens,
+            outputTokens: lastSingleUsage.outputTokens,
+            cacheReadTokens: lastSingleUsage.cacheReadTokens,
+            cacheCreationTokens: lastSingleUsage.cacheCreationTokens,
+            contextWindow: params.contextWindow,
+          });
+        }
+      }
+
       continue; // stream_event handled, skip normal processing
     }
 
@@ -793,6 +833,14 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       const usage = extractSingleUsage(sdkMessage);
       if (usage) {
         lastSingleUsage = usage;
+        emit('agent:context-usage', {
+          type: 'context-usage',
+          inputTokens: usage.inputTokens,
+          outputTokens: usage.outputTokens,
+          cacheReadTokens: usage.cacheReadTokens,
+          cacheCreationTokens: usage.cacheCreationTokens,
+          contextWindow: params.contextWindow,
+        });
       }
     }
 
@@ -1026,10 +1074,10 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       if (subtype === 'api_retry') {
         const errorStatus = msg.error_status as number | undefined;
         const error = msg.error as string | undefined;
+        const attempt = msg.attempt as number | undefined;
+        const maxRetries = msg.max_retries as number | undefined;
         if (errorStatus === 401 && error === 'authentication_failed') {
           detectedAuthRetry = true;
-          const attempt = msg.attempt as number | undefined;
-          const maxRetries = msg.max_retries as number | undefined;
           console.warn(
             `[Agent][${conversationId}] SDK auth retry detected: attempt=${attempt ?? '?'}/${maxRetries ?? '?'}, ` +
               `error_status=${errorStatus}, error=${error} — will refresh credentials after SDK finishes retrying`,
@@ -1043,6 +1091,19 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
           };
           sessionState.thoughts.push(authRetryThought);
           emit('agent:thought', { thought: authRetryThought });
+        } else {
+          // Forward non-401 API errors (429, 500, overloaded, etc.) to user
+          console.warn(
+            `[Agent][${conversationId}] API error: status=${errorStatus}, error=${error}, attempt=${attempt ?? '?'}/${maxRetries ?? '?'}`,
+          );
+          const apiErrorThought: Thought = {
+            id: `thought-api-warning-${Date.now()}`,
+            type: 'system',
+            content: `API 错误 (${errorStatus ?? '?'}): ${error ?? 'unknown'}`,
+            timestamp: new Date().toISOString(),
+          };
+          sessionState.thoughts.push(apiErrorThought);
+          emit('agent:thought', { thought: apiErrorThought });
         }
         continue;
       }

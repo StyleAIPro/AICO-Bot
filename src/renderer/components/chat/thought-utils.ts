@@ -289,26 +289,84 @@ export function groupSubagentThoughts(
   thoughts: Thought[],
   workerMatchMap: Map<string, WorkerSessionState>,
 ): ThoughtGroup[] {
-  return thoughts.map((thought) => {
+  // Separate main thoughts (no agentId) and inline subagent thoughts (has agentId)
+  // Sub-agent thoughts are dual-written to main session.thoughts with agentId tags.
+  const mainThoughts: Thought[] = [];
+  const inlineSubagentMap = new Map<string, Thought[]>();
+  for (const th of thoughts) {
+    if ((th as any).agentId) {
+      const group = inlineSubagentMap.get((th as any).agentId) || [];
+      group.push(th);
+      inlineSubagentMap.set((th as any).agentId, group);
+    } else {
+      mainThoughts.push(th);
+    }
+  }
+
+  const filterSubagentThoughts = (ths: Thought[]): Thought[] =>
+    ths
+      .filter((th) => {
+        if (th.type === 'result') return false;
+        if (th.type === 'tool_result') return false;
+        if (th.toolName === 'TodoWrite') return false;
+        return true;
+      });
+
+  // Assign inline subagent groups to Agent/Task tool_use thoughts by positional order
+  const orderedAgentIds = Array.from(inlineSubagentMap.keys());
+  const assignedInlineIds = new Set<string>();
+  let inlineIdx = 0;
+  for (const th of mainThoughts) {
+    if (
+      th.type === 'tool_use' &&
+      (th.toolName === 'Agent' || th.toolName === 'Task') &&
+      inlineIdx < orderedAgentIds.length
+    ) {
+      assignedInlineIds.add(orderedAgentIds[inlineIdx]);
+      inlineIdx++;
+    }
+  }
+
+  return mainThoughts.map((thought) => {
     const group: ThoughtGroup = { main: thought };
 
+    // Priority 1: match from workerSessions (live worker data)
     const worker = workerMatchMap.get(thought.id);
     if (worker && worker.thoughts.length > 0) {
-      const workerDisplayThoughts = worker.thoughts
-        .filter((th) => {
-          if (th.type === 'result') return false;
-          if (th.type === 'tool_result') return false;
-          if (th.toolName === 'TodoWrite') return false;
-          return true;
-        })
+      const workerDisplayThoughts = filterSubagentThoughts(worker.thoughts)
         .map((wThought) => ({
           ...wThought,
           agentId: worker.agentId,
           agentName: worker.agentName,
         }));
-
       if (workerDisplayThoughts.length > 0) {
         group.subagentThoughts = workerDisplayThoughts;
+      }
+      return group;
+    }
+
+    // Priority 2: match from inline agentId (dual-write fallback)
+    const agentId = (thought as any).agentId;
+    if (agentId && inlineSubagentMap.has(agentId)) {
+      const displayThoughts = filterSubagentThoughts(inlineSubagentMap.get(agentId) || []);
+      if (displayThoughts.length > 0) {
+        group.subagentThoughts = displayThoughts;
+      }
+      return group;
+    }
+
+    // Priority 3: positional match for Agent/Task tool_use without agentId on the thought itself
+    if (
+      thought.type === 'tool_use' &&
+      (thought.toolName === 'Agent' || thought.toolName === 'Task')
+    ) {
+      const nextAgentId = orderedAgentIds.find(id => !assignedInlineIds.has(id));
+      if (nextAgentId) {
+        const displayThoughts = filterSubagentThoughts(inlineSubagentMap.get(nextAgentId) || []);
+        if (displayThoughts.length > 0) {
+          group.subagentThoughts = displayThoughts;
+          assignedInlineIds.add(nextAgentId);
+        }
       }
     }
 

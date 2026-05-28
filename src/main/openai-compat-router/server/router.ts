@@ -7,7 +7,28 @@
 import express, { type Express, type Request, type Response } from 'express';
 import type { AnthropicRequest } from '../types';
 import { decodeBackendConfig } from '../utils';
+import { createLogger } from '../../services/log';
 import { handleMessagesRequest, handleCountTokensRequest } from './request-handler';
+
+const logger = createLogger('Router');
+
+function formatBodySize(req: Request): string {
+  const cl = req.headers['content-length'];
+  if (cl) return `${(Number(cl) / 1024).toFixed(1)}KB`;
+  const raw = (req as any).rawBody as Buffer | undefined;
+  if (raw) return `${(raw.length / 1024).toFixed(1)}KB`;
+  return 'unknown';
+}
+
+function formatSanitizedHeaders(req: Request): string {
+  const h = req.headers;
+  const parts: string[] = [];
+  if (h['content-type']) parts.push(`content-type=${String(h['content-type'])}`);
+  if (h['user-agent']) parts.push(`user-agent=${String(h['user-agent']).slice(0, 60)}`);
+  if (h['x-api-key']) parts.push(`x-api-key=${String(h['x-api-key']).slice(0, 8)}...`);
+  if (h['authorization']) parts.push(`authorization=${String(h['authorization']).slice(0, 16)}...`);
+  return parts.join(' ');
+}
 
 export interface RouterOptions {
   debug?: boolean;
@@ -35,7 +56,10 @@ export function createApp(options: RouterOptions = {}): Express {
 
   // Request logging middleware (production-level)
   app.use((req, _res, next) => {
-    console.log(`[Router] ${req.method} ${req.url}`);
+    const clientIp = req.ip || req.socket.remoteAddress || 'unknown';
+    logger.info(
+      `${req.method} ${req.url} from=${clientIp} ${formatSanitizedHeaders(req)} body=${formatBodySize(req)}`,
+    );
     next();
   });
 

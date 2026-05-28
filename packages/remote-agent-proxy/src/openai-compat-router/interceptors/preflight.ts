@@ -24,6 +24,7 @@
 
 import type { AnthropicRequest, AnthropicSystemBlock } from '../types'
 import type { RequestInterceptor, InterceptorContext, InterceptorResult } from './types'
+import { log, SCOPE } from '../../logger.js'
 
 // ============================================================================
 // Fingerprint Definitions
@@ -225,7 +226,7 @@ export const preflightInterceptor: RequestInterceptor = {
       return { handled: false }
     }
 
-    console.log(`[Interceptor:preflight] Intercepted ${fp.name}, returning mock response`)
+    log.info(SCOPE.SERVER, `Intercepted ${fp.name}, returning mock response`)
     sendMockAnthropicResponse(context, fp.mockResponseText)
     return { handled: true, responded: true }
   }

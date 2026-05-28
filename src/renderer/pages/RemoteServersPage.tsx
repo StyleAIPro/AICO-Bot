@@ -283,13 +283,16 @@ export function RemoteServersPage() {
       if (result.success) {
         const data = result.data as any;
         if (data?.partial) {
+          const isAuthError = data.authError === true;
           useNotificationStore.getState().show({
-            title: t('Server added but connection failed'),
+            title: isAuthError
+              ? t('Authentication failed')
+              : t('Server added but connection failed'),
             body: data.error
-              ? t('SSH connection failed: {{error}}. You can retry later in the server list.', { error: data.error })
-              : t('SSH connection failed. You can retry later in the server list.'),
-            variant: 'warning',
-            duration: 8000,
+              ? t('Connection failed: {{error}}. Please check your credentials and retry.', { error: data.error })
+              : t('Connection failed. Please check your credentials and retry.'),
+            variant: isAuthError ? 'error' : 'warning',
+            duration: isAuthError ? 0 : 8000,
           });
         }
         await loadServers();

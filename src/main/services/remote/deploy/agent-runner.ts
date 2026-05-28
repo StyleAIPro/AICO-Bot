@@ -7,9 +7,11 @@
 
 import type { SSHManager } from '../ssh/ssh-manager';
 import { SYSTEM_PROMPT_TEMPLATE } from '../../agent/system-prompt';
-import { removePooledConnection } from '../ws/remote-ws-client';
-import { getDeployPath, escapeEnvValue, REQUIRED_SDK_VERSION, AGENT_CHECK_COMMAND } from './agent-deployer';
+import { acquireConnection, releaseConnection, removePooledConnection } from '../ws/remote-ws-client';
+import { getDeployPath, REQUIRED_SDK_VERSION, AGENT_CHECK_COMMAND } from './agent-deployer';
 import type { RemoteDeployService } from './remote-deploy.service';
+import { getConfig } from '../../config.service';
+import { decryptString } from '../../auth/secure-storage.service';
 
 /**
  * Register this instance's auth token with a running remote proxy.
@@ -755,19 +757,28 @@ export async function sendAgentChat(
     throw new Error(`Server not found: ${id}`);
   }
 
-  // Get the WebSocket client for this server
-  const wsClient = (service as any).getOrCreateWsClient(id, server);
+  const effectiveSessionId = params.sessionId || `session-${Date.now()}`;
+  const callerId = `remote-agent:chat:${effectiveSessionId}`;
+  const wsClient = await getOrCreateWsClient(service, id, server, callerId);
+  const attachmentLines =
+    params.attachments
+      ?.filter((attachment: any) => attachment?.type === 'file' && attachment?.path)
+      .map((attachment: any) => `- ${attachment.name || attachment.path}: ${attachment.path}`) || [];
+  const userContent =
+    attachmentLines.length > 0
+      ? `${params.content}\n\nAttached remote files:\n${attachmentLines.join('\n')}`
+      : params.content;
 
   try {
     // Send chat message with streaming
     const result = await wsClient.sendChatWithStream(
-      params.sessionId || `session-${Date.now()}`,
-      [{ role: 'user', content: params.content }],
+      effectiveSessionId,
+      [{ role: 'user', content: userContent }],
     );
 
     return {
       response: result.content,
-      sessionId: params.sessionId,
+      sessionId: effectiveSessionId,
       tokenUsage: result.tokenUsage
         ? {
             inputTokens: result.tokenUsage.inputTokens || 0,
@@ -782,6 +793,8 @@ export async function sendAgentChat(
   } catch (error) {
     console.error(`[RemoteDeployService] Failed to send chat to agent:`, error);
     throw error;
+  } finally {
+    releaseConnection(id, callerId);
   }
 }
 
@@ -791,16 +804,50 @@ export async function sendAgentChat(
  */
 export function subscribeToTaskUpdates(service: RemoteDeployService, serverId: string): () => void {
   const { BrowserWindow } = require('electron');
-  const wsClient = (service as any).getOrCreateWsClient(serverId, (service as any).servers.get(serverId));
-  const handler = (data: any) => {
-    const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
-    if (win && !win.isDestroyed()) {
-      win.webContents.send('remote-server:task-update', { serverId, data });
+  const server = (service as any).servers.get(serverId);
+  if (!server) {
+    throw new Error(`Server not found: ${serverId}`);
+  }
+
+  const callerId = `remote-agent:tasks-subscribe:${serverId}`;
+  let released = false;
+  let connectionReleased = false;
+  let activeClient: any;
+  let activeHandler: ((data: any) => void) | undefined;
+  const releaseOnce = () => {
+    if (connectionReleased) {
+      return;
     }
+    connectionReleased = true;
+    releaseConnection(serverId, callerId);
   };
-  wsClient.on('task:update', handler);
+
+  void getOrCreateWsClient(service, serverId, server, callerId)
+    .then((wsClient) => {
+      activeClient = wsClient;
+      const handler = (data: any) => {
+        const win = BrowserWindow.getFocusedWindow() || BrowserWindow.getAllWindows()[0];
+        if (win && !win.isDestroyed()) {
+          win.webContents.send('remote-server:task-update', { serverId, data });
+        }
+      };
+      activeHandler = handler;
+      wsClient.on('task:update', handler);
+      if (released) {
+        wsClient.off('task:update', handler);
+        releaseOnce();
+      }
+    })
+    .catch((error) => {
+      console.error(`[RemoteDeployService] Failed to subscribe to task updates:`, error);
+    });
+
   return () => {
-    wsClient.off('task:update', handler);
+    released = true;
+    if (activeClient && activeHandler) {
+      activeClient.off('task:update', activeHandler);
+      releaseOnce();
+    }
   };
 }
 
@@ -808,68 +855,89 @@ export function subscribeToTaskUpdates(service: RemoteDeployService, serverId: s
  * List background tasks on a remote server
  */
 export function listRemoteTasks(service: RemoteDeployService, serverId: string): Promise<any[]> {
-  const wsClient = (service as any).getOrCreateWsClient(serverId, (service as any).servers.get(serverId));
-  return new Promise((resolve, _reject) => {
-    const handler = (data: any) => {
-      wsClient.off('task:list', handler);
-      resolve(data);
-    };
-    wsClient.on('task:list', handler);
-    wsClient.listTasks();
-    // Timeout after 5s
-    setTimeout(() => {
-      wsClient.off('task:list', handler);
-      resolve([]);
-    }, 5000);
-  });
+  const server = (service as any).servers.get(serverId);
+  if (!server) {
+    return Promise.reject(new Error(`Server not found: ${serverId}`));
+  }
+
+  const callerId = `remote-agent:list-tasks:${Date.now()}`;
+  return getOrCreateWsClient(service, serverId, server, callerId).then(
+    (wsClient) =>
+      new Promise((resolve, _reject) => {
+        const finish = (result: any[]) => {
+          wsClient.off('task:list', handler);
+          clearTimeout(timeout);
+          releaseConnection(serverId, callerId);
+          resolve(result);
+        };
+        const handler = (data: any) => {
+          finish(data);
+        };
+        const timeout = setTimeout(() => {
+          finish([]);
+        }, 5000);
+        wsClient.on('task:list', handler);
+        if (!wsClient.listTasks()) {
+          finish([]);
+        }
+      }),
+  );
 }
 
 /**
  * Cancel a background task on a remote server
  */
 export function cancelRemoteTask(service: RemoteDeployService, serverId: string, taskId: string): Promise<boolean> {
-  const wsClient = (service as any).getOrCreateWsClient(serverId, (service as any).servers.get(serverId));
-  return new Promise((resolve, _reject) => {
-    const handler = (data: any) => {
-      wsClient.off('task:cancel', handler);
-      resolve(data?.success ?? false);
-    };
-    wsClient.on('task:cancel', handler);
-    wsClient.cancelTask(taskId);
-    setTimeout(() => {
-      wsClient.off('task:cancel', handler);
-      resolve(false);
-    }, 5000);
-  });
+  const server = (service as any).servers.get(serverId);
+  if (!server) {
+    return Promise.reject(new Error(`Server not found: ${serverId}`));
+  }
+
+  const callerId = `remote-agent:cancel-task:${taskId}:${Date.now()}`;
+  return getOrCreateWsClient(service, serverId, server, callerId).then(
+    (wsClient) =>
+      new Promise((resolve, _reject) => {
+        const finish = (result: boolean) => {
+          wsClient.off('task:cancel', handler);
+          clearTimeout(timeout);
+          releaseConnection(serverId, callerId);
+          resolve(result);
+        };
+        const handler = (data: any) => {
+          finish(data?.success ?? false);
+        };
+        const timeout = setTimeout(() => {
+          finish(false);
+        }, 5000);
+        wsClient.on('task:cancel', handler);
+        if (!wsClient.cancelTask(taskId)) {
+          finish(false);
+        }
+      }),
+  );
 }
 
 /**
  * Get or create WebSocket client for a server
  */
-export function getOrCreateWsClient(service: RemoteDeployService, id: string, server: any): any {
-  // Dynamic import to avoid circular dependency
-  const { RemoteWsClient } = require('../ws/remote-ws-client');
-
-  // Check if we already have a client for this server
-  const existingClient = (RemoteWsClient as any).getRemoteWsClient(id);
-  if (existingClient) {
-    return existingClient;
-  }
-
+export async function getOrCreateWsClient(
+  _service: RemoteDeployService,
+  id: string,
+  server: any,
+  callerId: string = `remote-agent:${id}`,
+): Promise<any> {
   // Resolve API credentials -- server card aiSourceId takes precedence, then global AI source
-  const { getConfig } = require('../../config.service');
-  const { decryptString } = require('../../auth/secure-storage.service');
   const config = getConfig();
   const sourceId = server.aiSourceId || config.aiSources?.currentId;
   const currentSource = sourceId
     ? config.aiSources?.sources?.find((s: any) => s.id === sourceId)
     : undefined;
 
-  // Decrypt apiKey (handles both encrypted aiSources and plaintext server card values)
-  const apiKeyRaw = server.claudeApiKey || currentSource?.apiKey || config.api?.apiKey;
+  // Resolve from AI source directly (server card values are stale after global switches)
+  const apiKeyRaw = currentSource?.apiKey || config.api?.apiKey;
   const apiKey = apiKeyRaw ? decryptString(apiKeyRaw) : undefined;
-  const baseUrl = server.claudeBaseUrl || currentSource?.apiUrl;
-  const model = server.claudeModel || currentSource?.model || config.api?.model;
+  const baseUrl = currentSource?.apiUrl;
+  const model = currentSource?.model || config.api?.model;
 
   // Create new WebSocket client
   const wsConfig = {
@@ -884,8 +952,7 @@ export function getOrCreateWsClient(service: RemoteDeployService, id: string, se
     model: model || undefined,
   };
 
-  const client = new RemoteWsClient(wsConfig);
-  return client;
+  return acquireConnection(id, wsConfig, callerId);
 }
 
 // ===== Agent installed check =====

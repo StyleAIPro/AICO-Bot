@@ -219,11 +219,27 @@ export async function getOrCreateV2Session(
   // Check if we have an existing session for this conversation
   const existing = v2Sessions.get(conversationId);
   if (existing) {
-    // CRITICAL: First check if the underlying process is still alive
-    // The CC subprocess may have been killed by OS (OOM, etc.) or crashed,
-    // but our v2Sessions Map still holds a reference to the dead session.
-    // We must check SDK's transport state (Single Source of Truth) before reusing.
-    if (!isSessionTransportReady(existing.session)) {
+    // CRITICAL: Detect stuck requests from safety-timeout scenario.
+    // When user clicks stop and SDK subprocess doesn't respond to interrupt() within 5s,
+    // processStream gets stuck in `for await` loop (abort check only triggers on new messages).
+    // Frontend's 10s safety timeout then clears isGenerating, allowing a new sendMessage.
+    // The old session is still in v2Sessions with a seemingly-ready transport, so
+    // getOrCreateV2Session reuses it — creating two concurrent stream consumers.
+    // Fix: if activeSessions has an entry with an already-triggered abort signal, the
+    // previous processStream is stuck and the session must be force-closed.
+    const stuckActive = activeSessions.get(conversationId);
+    if (stuckActive && stuckActive.abortController.signal.aborted) {
+      console.log(
+        `[Agent][${conversationId}] Previous request aborted but stuck, force-closing session`,
+      );
+      activeSessions.delete(conversationId);
+      closeV2SessionForRebuild(conversationId);
+      // Fall through to create new session
+    } else if (!isSessionTransportReady(existing.session)) {
+      // CRITICAL: Check if the underlying process is still alive
+      // The CC subprocess may have been killed by OS (OOM, etc.) or crashed,
+      // but our v2Sessions Map still holds a reference to the dead session.
+      // We must check SDK's transport state (Single Source of Truth) before reusing.
       console.log(
         `[Agent][${conversationId}] Session transport not ready (process dead), recreating...`,
       );

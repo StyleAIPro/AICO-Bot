@@ -8,7 +8,7 @@
  * - Get session state for recovery
  */
 
-import { activeSessions, v2Sessions, invalidateSession, unregisterActiveSession } from './session-manager';
+import { activeSessions, v2Sessions, invalidateSession } from './session-manager';
 import { getRemoteWsClient } from '../remote/ws/remote-ws-client';
 import { rejectAllQuestions, rejectAllPermissions } from './permission-handler';
 import type { Thought } from './types';
@@ -31,7 +31,11 @@ export async function stopGeneration(conversationId?: string): Promise<void> {
   rejectAllQuestions();
   rejectAllPermissions();
 
+
   if (conversationId) {
+    // Reject pending AskUserQuestion prompts only for this conversation.
+    rejectAllQuestions(conversationId);
+
     // Stop specific session
     const session = activeSessions.get(conversationId);
     console.log(`[Agent][control.ts] Session found: ${!!session}`);
@@ -112,7 +116,8 @@ export async function stopGeneration(conversationId?: string): Promise<void> {
           // 1. Sending interrupt message to remote server
           // 2. Waiting 300ms for queued events to process
           // 3. Setting isInterrupted flag
-          // 4. Disconnecting the          console.log(`[Agent][control.ts] Sending interrupt to remote server...`)
+          // 4. Disconnecting the client after delay
+          console.log(`[Agent][control.ts] Sending interrupt to remote server...`)
           const interruptResult = await remoteClient.interrupt(conversationId);
           console.log(
             `[Agent] Remote session interrupted for: ${conversationId}, result=${interruptResult}`,
@@ -132,6 +137,9 @@ export async function stopGeneration(conversationId?: string): Promise<void> {
       );
     }
   } else {
+    // Reject all pending AskUserQuestion prompts when stopping everything.
+    rejectAllQuestions();
+
     // Stop all sessions (backward compatibility)
     for (const [convId, session] of Array.from(activeSessions)) {
       session.abortController.abort();

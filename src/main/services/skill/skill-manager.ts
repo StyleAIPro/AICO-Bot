@@ -9,7 +9,11 @@
 
 import * as path from 'path';
 import * as fs from 'fs/promises';
-import { existsSync } from 'fs';
+import * as fsSync from 'fs';
+import { existsSync, createReadStream, createWriteStream, mkdirSync } from 'fs';
+import * as os from 'os';
+import * as crypto from 'crypto';
+import * as yauzl from 'yauzl';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type {
   SkillSpec,
@@ -18,6 +22,12 @@ import type {
   SkillFileNode,
 } from '../../shared/skill/skill-types';
 import { getAgentsSkillsDir, getClaudeSkillsDir, getAllSkillsDirs } from '../config.service';
+
+export interface ImportSkillsResult {
+  installed: string[];
+  skipped: string[];
+  errors: string[];
+}
 
 export class SkillManager {
   private static instance: SkillManager;
@@ -602,5 +612,275 @@ export class SkillManager {
   async refresh(): Promise<void> {
     await this.loadSkills();
     console.log('[SkillManager] Refreshed skills');
+  }
+
+  /**
+   * 从目录批量导入技能（核心方法）
+   * 递归扫描所有子目录，找到含 SKILL.md 或 SKILL.yaml 的目录视为一个技能
+   */
+  async installFromDirectory(
+    dirPath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<ImportSkillsResult> {
+    const result: ImportSkillsResult = { installed: [], skipped: [], errors: [] };
+
+    console.log('[SkillManager:installFromDirectory] dirPath:', dirPath);
+    const targetDir = this.skillsDirs[0];
+    console.log('[SkillManager:installFromDirectory] targetDir:', targetDir);
+
+    // 递归查找所有含 SKILL.md 或 SKILL.yaml 的目录
+    const skillDirs = await this.findSkillDirs(dirPath);
+    console.log('[SkillManager:installFromDirectory] found skill dirs:', skillDirs.map(d => d.skillName));
+
+    if (skillDirs.length === 0) {
+      result.errors.push('No directories containing SKILL.md or SKILL.yaml found');
+      return result;
+    }
+
+    for (const { skillName, srcPath } of skillDirs) {
+      const destPath = path.join(targetDir, skillName);
+      const tmpDest = path.join(targetDir, `.installing-${skillName}`);
+
+      try {
+        // 先复制到临时目录，成功后再替换旧技能（避免复制失败丢技能）
+        await this.copyDirRecursive(srcPath, tmpDest);
+
+        if (existsSync(destPath)) {
+          await fs.rm(destPath, { recursive: true, force: true });
+        }
+        await fs.rename(tmpDest, destPath);
+
+        result.installed.push(skillName);
+        onProgress?.(`Installed: ${skillName}`);
+      } catch (err) {
+        // 清理临时目录
+        await fs.rm(tmpDest, { recursive: true, force: true }).catch(() => {});
+        const msg = err instanceof Error ? err.message : String(err);
+        result.errors.push(`${skillName}: ${msg}`);
+        onProgress?.(`Failed: ${skillName} - ${msg}`);
+      }
+    }
+
+    await this.refresh();
+
+    onProgress?.(
+      `Done. Installed: ${result.installed.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`,
+    );
+
+    return result;
+  }
+
+  /**
+   * 递归查找所有含 SKILL.md 或 SKILL.yaml 的目录
+   */
+  private async findSkillDirs(
+    dirPath: string,
+    maxDepth: number = 3,
+  ): Promise<Array<{ skillName: string; srcPath: string }>> {
+    const found: Array<{ skillName: string; srcPath: string }> = [];
+
+    async function scan(currentDir: string, depth: number) {
+      if (depth > maxDepth) return;
+      const entries = await fs.readdir(currentDir, { withFileTypes: true });
+      const subDirs = entries.filter((e) => e.isDirectory());
+
+      for (const dir of subDirs) {
+        const fullPath = path.join(currentDir, dir.name);
+        const hasSkillMd = existsSync(path.join(fullPath, 'SKILL.md'));
+        const hasSkillYaml = existsSync(path.join(fullPath, 'SKILL.yaml'));
+
+        if (hasSkillMd || hasSkillYaml) {
+          found.push({ skillName: dir.name, srcPath: fullPath });
+        } else {
+          // 不是技能目录，继续向下递归
+          await scan(fullPath, depth + 1);
+        }
+      }
+    }
+
+    await scan(dirPath, 0);
+    return found;
+  }
+
+  /**
+   * 从 ZIP 文件导入技能
+   * 使用 yauzl 直接从 ZIP 流式提取，不走 temp 目录。
+   */
+  async installFromZip(
+    filePath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<ImportSkillsResult> {
+    console.log('[SkillManager:installFromZip] filePath:', filePath);
+    const result: ImportSkillsResult = { installed: [], skipped: [], errors: [] };
+    const targetDir = this.skillsDirs[0];
+
+    onProgress?.(`Extracting ZIP: ${path.basename(filePath)}...`);
+
+    try {
+      // 第一遍：找到所有含 SKILL.md 的目录及其在 ZIP 中的前缀
+      const skillFileMap = new Map<string, { prefix: string; entries: string[] }>();
+
+      await new Promise<void>((resolve, reject) => {
+        yauzl.open(filePath, { lazyEntries: true }, (openErr, zip) => {
+          if (openErr) { reject(openErr); return; }
+
+          zip.on('entry', (entry) => {
+            const parts = entry.fileName.split('/').filter(Boolean);
+            const fileName = parts[parts.length - 1];
+
+            if (fileName === 'SKILL.md' || fileName === 'SKILL.yaml') {
+              if (parts.length >= 2) {
+                const skillName = parts[parts.length - 2];
+                const prefix = parts.slice(0, parts.length - 1).join('/') + '/';
+                if (!skillFileMap.has(skillName)) {
+                  skillFileMap.set(skillName, { prefix, entries: [] });
+                }
+              }
+            }
+
+            zip.readEntry();
+          });
+
+          zip.on('end', resolve);
+          zip.on('error', reject);
+          zip.readEntry();
+        });
+      });
+
+      // 第二遍：收集每个技能目录下的所有文件
+      await new Promise<void>((resolve, reject) => {
+        yauzl.open(filePath, { lazyEntries: true }, (openErr, zip) => {
+          if (openErr) { reject(openErr); return; }
+
+          zip.on('entry', (entry) => {
+            for (const [, data] of skillFileMap) {
+              if (entry.fileName.startsWith(data.prefix)) {
+                data.entries.push(entry.fileName);
+                break;
+              }
+            }
+            zip.readEntry();
+          });
+
+          zip.on('end', resolve);
+          zip.on('error', reject);
+          zip.readEntry();
+        });
+      });
+
+      const validSkills = [...skillFileMap.entries()].map(([name, data]) => ({
+        name,
+        prefix: data.prefix,
+        entries: data.entries,
+      }));
+
+      console.log('[SkillManager:installFromZip] found skills:', validSkills.map(s => `${s.name}(${s.entries.length} files)`));
+
+      if (validSkills.length === 0) {
+        result.errors.push('No directories containing SKILL.md found in ZIP');
+        return result;
+      }
+
+      // 逐个提取技能
+      for (const { name: skillName, prefix, entries: skillEntries } of validSkills) {
+        const destPath = path.join(targetDir, skillName);
+        const tmpDest = path.join(targetDir, `.installing-${skillName}`);
+
+        try {
+          await fs.rm(tmpDest, { recursive: true, force: true }).catch(() => {});
+          mkdirSync(tmpDest, { recursive: true });
+
+          const entrySet = new Set(skillEntries);
+
+          // 重新打开 ZIP 提取该技能的文件
+          await new Promise<void>((resolve, reject) => {
+            yauzl.open(filePath, { lazyEntries: true }, (openErr, zip) => {
+              if (openErr) { reject(openErr); return; }
+              let pending = skillEntries.length;
+              if (pending === 0) { resolve(); return; }
+              const done = () => { if (--pending === 0) resolve(); };
+
+              zip.on('entry', (entry) => {
+                if (!entrySet.has(entry.fileName)) {
+                  zip.readEntry();
+                  return;
+                }
+
+                const relativePath = entry.fileName.slice(prefix.length);
+                const destFilePath = path.join(tmpDest, relativePath);
+
+                if (/\/$/.test(entry.fileName)) {
+                  mkdirSync(destFilePath, { recursive: true });
+                  done();
+                  zip.readEntry();
+                  return;
+                }
+
+                mkdirSync(path.dirname(destFilePath), { recursive: true });
+
+                zip.openReadStream(entry, (streamErr, readStream) => {
+                  if (streamErr) {
+                    console.error(`[SkillManager] readStream error: ${entry.fileName}`, streamErr);
+                    done();
+                    zip.readEntry();
+                    return;
+                  }
+                  const writeStream = createWriteStream(destFilePath);
+                  readStream.pipe(writeStream);
+                  readStream.on('end', () => {
+                    writeStream.close();
+                    done();
+                    zip.readEntry();
+                  });
+                  readStream.on('error', (e) => {
+                    console.error(`[SkillManager] read error: ${entry.fileName}`, e);
+                    writeStream.close();
+                    done();
+                    zip.readEntry();
+                  });
+                });
+              });
+
+              zip.on('end', resolve);
+              zip.on('error', reject);
+              zip.readEntry();
+            });
+          });
+
+          if (existsSync(destPath)) {
+            await fs.rm(destPath, { recursive: true, force: true });
+          }
+          await fs.rename(tmpDest, destPath);
+
+          result.installed.push(skillName);
+          onProgress?.(`Installed: ${skillName}`);
+        } catch (err) {
+          await fs.rm(tmpDest, { recursive: true, force: true }).catch(() => {});
+          const msg = err instanceof Error ? err.message : String(err);
+          result.errors.push(`${skillName}: ${msg}`);
+          onProgress?.(`Failed: ${skillName} - ${msg}`);
+        }
+      }
+
+      await this.refresh();
+      onProgress?.(
+        `Done. Installed: ${result.installed.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`,
+      );
+
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[SkillManager:installFromZip] failed:', msg, err);
+      return { installed: [], skipped: [], errors: [`ZIP processing failed: ${msg}`] };
+    }
+  }
+
+  /**
+   * 递归复制目录（处理 symlink）
+   * extract-zip 在 Windows 上会创建 symlink，fs.copyFile 无法处理，
+   * 所以用 fs.cpSync 并解析 symlink 到实际文件。
+   */
+  private async copyDirRecursive(src: string, dest: string): Promise<void> {
+    fsSync.cpSync(src, dest, { recursive: true, force: true, verbatimSymlinks: false });
   }
 }

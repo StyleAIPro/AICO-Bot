@@ -52,6 +52,7 @@ export interface AicoBotAPI {
   updateSpace: (spaceId: string, updates: { name?: string; icon?: string }) => Promise<IpcResponse>;
   getDefaultSpacePath: () => Promise<IpcResponse>;
   selectFolder: () => Promise<IpcResponse>;
+  showOpenDialog: (options: { title?: string; filters?: Array<{ name: string; extensions: string[] }>; properties: Array<'openFile' | 'openDirectory' | 'multiSelections'> }) => Promise<string[]>;
   updateSpacePreferences: (
     spaceId: string,
     preferences: {
@@ -193,6 +194,8 @@ export interface AicoBotAPI {
   onKbIngestProgress: (callback: (data: { current: number; total: number; fileName: string; sourceId?: string; completedSourceId?: string }) => void) => (() => void);
 
   compactContext: (conversationId: string) => Promise<IpcResponse>;
+  continueIdleTimeout: (conversationId: string) => Promise<IpcResponse>;
+  forceIdleTimeout: (conversationId: string) => Promise<IpcResponse>;
 
   // Event listeners
   onAgentMessage: (callback: (data: unknown) => void) => () => void;
@@ -205,6 +208,7 @@ export interface AicoBotAPI {
   onAgentThoughtDelta: (callback: (data: unknown) => void) => () => void;
   onAgentMcpStatus: (callback: (data: unknown) => void) => () => void;
   onAgentCompact: (callback: (data: unknown) => void) => () => void;
+  onAgentContextUsage: (callback: (data: unknown) => void) => () => void;
   onAgentAskQuestion: (callback: (data: unknown) => void) => () => void;
   onAgentPermissionRequest: (callback: (data: unknown) => void) => () => void;
   onAgentTerminal: (callback: (data: unknown) => void) => () => void;
@@ -600,6 +604,7 @@ export interface AicoBotAPI {
     skillId?: string;
     yamlContent?: string;
   }) => Promise<IpcResponse>;
+  skillImportSkills: (input: { sourceType: 'zip' | 'folder'; filePath: string }) => Promise<IpcResponse>;
   skillFiles: (skillId: string) => Promise<IpcResponse>;
   skillFileContent: (skillId: string, filePath: string) => Promise<IpcResponse>;
   skillFileSave: (skillId: string, filePath: string, content: string) => Promise<IpcResponse>;
@@ -821,6 +826,7 @@ const api: AicoBotAPI = {
   updateSpace: (spaceId, updates) => ipcRenderer.invoke('space:update', spaceId, updates),
   getDefaultSpacePath: () => ipcRenderer.invoke('space:get-default-path'),
   selectFolder: () => ipcRenderer.invoke('dialog:select-folder'),
+  showOpenDialog: (options) => ipcRenderer.invoke('dialog:open', options),
   updateSpacePreferences: (spaceId, preferences) =>
     ipcRenderer.invoke('space:update-preferences', spaceId, preferences),
 
@@ -931,6 +937,8 @@ const api: AicoBotAPI = {
     createEventListener('knowledge-base:ingest-progress', callback),
 
   compactContext: (conversationId) => ipcRenderer.invoke('agent:compact-context', conversationId),
+  continueIdleTimeout: (conversationId) => ipcRenderer.invoke('agent:continue-idle-timeout', conversationId),
+  forceIdleTimeout: (conversationId) => ipcRenderer.invoke('agent:force-idle-timeout', conversationId),
 
   // Event listeners
   onAgentMessage: (callback) => createEventListener('agent:message', callback),
@@ -943,6 +951,7 @@ const api: AicoBotAPI = {
   onAgentThoughtDelta: (callback) => createEventListener('agent:thought-delta', callback),
   onAgentMcpStatus: (callback) => createEventListener('agent:mcp-status', callback),
   onAgentCompact: (callback) => createEventListener('agent:compact', callback),
+  onAgentContextUsage: (callback) => createEventListener('agent:context-usage', callback),
   onAgentAskQuestion: (callback) => createEventListener('agent:ask-question', callback),
   onAgentPermissionRequest: (callback) => createEventListener('agent:permission-request', callback),
   onAgentTerminal: (callback) => createEventListener('agent:terminal', callback),
@@ -1234,6 +1243,7 @@ const api: AicoBotAPI = {
   skillUninstall: (skillId) => ipcRenderer.invoke('skill:uninstall', skillId),
   skillExport: (skillId) => ipcRenderer.invoke('skill:export', skillId),
   skillInstall: (input) => ipcRenderer.invoke('skill:install', input),
+  skillImportSkills: (input) => ipcRenderer.invoke('skill:import-skills', input),
   skillInstallMulti: (input) => ipcRenderer.invoke('skill:install-multi', input),
   skillUninstallMulti: (input) => ipcRenderer.invoke('skill:uninstall-multi', input),
   skillSyncToRemote: (input) => ipcRenderer.invoke('skill:sync-to-remote', input),

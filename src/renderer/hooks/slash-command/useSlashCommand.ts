@@ -18,12 +18,15 @@ import i18next from 'i18next';
 import { slashCommandRegistry } from './slash-command-registry';
 import { executeSlashCommand } from './slash-command-executor';
 import type { SlashCommandMenuItem, SlashCommandMatch, SlashCommandExecutionResult } from './types';
+import { useSkillStore } from '../../stores/skill/skill.store';
 
 interface UseSlashCommandOptions {
   content: string;
   setContent: React.Dispatch<React.SetStateAction<string>>;
   textareaRef: React.RefObject<HTMLTextAreaElement | null>;
   onExecuteCommand?: (result: SlashCommandExecutionResult) => void;
+  claudeSource?: 'local' | 'remote';
+  remoteServerId?: string;
 }
 
 interface UseSlashCommandResult {
@@ -42,6 +45,8 @@ export function useSlashCommand({
   setContent,
   textareaRef,
   onExecuteCommand,
+  claudeSource,
+  remoteServerId,
 }: UseSlashCommandOptions): UseSlashCommandResult {
   const { t } = useTranslation();
   const [showCommandMenu, setShowCommandMenu] = useState(false);
@@ -51,6 +56,22 @@ export function useSlashCommand({
   const [currentMatch, setCurrentMatch] = useState<SlashCommandMatch>({ type: 'none' });
 
   const commandMenuRef = useRef<HTMLDivElement>(null);
+
+  const installedSkills = useSkillStore((s) => s.installedSkills);
+  const loadInstalledSkills = useSkillStore((s) => s.loadInstalledSkills);
+  const remoteSkills = useSkillStore((s) => s.remoteSkills);
+  const loadRemoteSkills = useSkillStore((s) => s.loadRemoteSkills);
+
+  const isRemote = claudeSource === 'remote' && !!remoteServerId;
+  const skills = isRemote ? (remoteSkills[remoteServerId!] ?? []) : installedSkills;
+
+  useEffect(() => {
+    if (isRemote && remoteServerId) {
+      loadRemoteSkills(remoteServerId);
+    } else {
+      loadInstalledSkills();
+    }
+  }, [isRemote, remoteServerId, loadInstalledSkills, loadRemoteSkills]);
 
   // Close menu when clicking outside
   useEffect(() => {
@@ -94,7 +115,7 @@ export function useSlashCommand({
         const filtered = allCommands.filter((cmd) =>
           cmd.name.toLowerCase().includes(query.toLowerCase()),
         );
-        const items: SlashCommandMenuItem[] = filtered.map((cmd) => ({
+        const commandItems: SlashCommandMenuItem[] = filtered.map((cmd) => ({
           type: 'command' as const,
           label: t(cmd.labelKey),
           description: t(cmd.descriptionKey),
@@ -102,6 +123,28 @@ export function useSlashCommand({
           command: cmd,
           insertText: `/${cmd.name} `,
         }));
+
+        // Merge installed skills into menu
+        const enabledSkills = skills.filter((s) => s.enabled);
+        const filteredSkills = enabledSkills.filter((s) => {
+          const name = s.spec.name.toLowerCase();
+          const trigger = s.spec.trigger_command?.toLowerCase() ?? '';
+          const q = query.toLowerCase();
+          return name.includes(q) || trigger.includes(q);
+        });
+        const skillItems: SlashCommandMenuItem[] = filteredSkills.map((skill) => {
+          const triggerCmd = skill.spec.trigger_command || `/${skill.spec.name}`;
+          return {
+            type: 'skill' as const,
+            label: triggerCmd,
+            description: skill.spec.description,
+            icon: 'Sparkles',
+            skill,
+            insertText: `${triggerCmd} `,
+          };
+        });
+
+        const items = [...commandItems, ...skillItems];
         setMatchedCommands(items);
         setShowCommandMenu(items.length > 0);
       } else if (match.type === 'subcommand' && match.command?.subcommands) {
@@ -125,7 +168,7 @@ export function useSlashCommand({
         setMatchedCommands([]);
       }
     },
-    [t],
+    [t, skills],
   );
 
   /**

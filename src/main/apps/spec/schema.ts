@@ -399,6 +399,11 @@ export const AppSpecBaseSchema = z.object({
   permissions: z.array(z.string()).optional(),
 
   /**
+   * Whether this skill is allowed to create sub-agents (Agent/Task tools).
+   */
+  allow_sub_agents: z.boolean().optional(),
+
+  /**
    * MCP server configuration (only for type=mcp).
    * This is the standard Claude Code MCP server config format.
    */

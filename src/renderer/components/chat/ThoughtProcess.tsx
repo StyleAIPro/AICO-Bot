@@ -41,6 +41,8 @@ interface ThoughtProcessProps {
   isThinking: boolean;
   workerSessions?: Map<string, WorkerSessionState>;
   defaultExpanded?: boolean;
+  /** When true, thoughts are already a sub-agent's own — skip groupSubagentThoughts */
+  isWorkerView?: boolean;
 }
 
 // i18n static keys for extraction (DO NOT REMOVE)
@@ -849,6 +851,7 @@ export function ThoughtProcess({
   isThinking,
   workerSessions,
   defaultExpanded,
+  isWorkerView = false,
 }: ThoughtProcessProps) {
   // Start collapsed (or expanded if defaultExpanded is set), auto-expand when streaming starts
   const [isExpanded, setIsExpanded] = useState(defaultExpanded ?? false);
@@ -910,8 +913,12 @@ export function ThoughtProcess({
       if (t.toolName === 'TodoWrite') return false;
       return true;
     });
+    // Worker view: thoughts already belong to this sub-agent, no grouping needed
+    if (isWorkerView) {
+      return filtered.map((t) => ({ main: t }));
+    }
     return groupSubagentThoughts(filtered, workerMatchMap);
-  }, [thoughts, workerMatchMap]);
+  }, [thoughts, workerMatchMap, isWorkerView]);
 
   // Smart auto-scroll: only scrolls when user is at bottom
   // Stops auto-scroll when user scrolls up to read history

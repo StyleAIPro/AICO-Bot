@@ -22,6 +22,7 @@ export type MailboxMessageType =
   | 'task_claimed' // Worker claims a task
   | 'task_progress' // Worker reports intermediate progress
   | 'task_completed' // Worker completes a task
+  | 'task_failed' // Worker failed a task
   | 'permission_request' // Worker needs user/leader approval
   | 'permission_response' // Approval/denial response
   | 'idle_notification' // Worker announces it is idle and available

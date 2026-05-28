@@ -70,7 +70,10 @@ export function registerRemoteServerHandlers(): void {
       if (result.sshConnected) {
         return { success: true, data: { id: result.id } };
       } else {
-        return { success: true, data: { id: result.id, partial: true, error: result.error } };
+        return {
+          success: true,
+          data: { id: result.id, partial: true, error: result.error, authError: result.authError },
+        };
       }
     } catch (error: unknown) {
       const err = error as Error;
@@ -178,7 +181,7 @@ export function registerRemoteServerHandlers(): void {
   wrapIpcHandle('remote-server:delete', async (_event, id: string) => {
     console.log('[IPC] remote-server:delete - Removing server:', id);
     try {
-      deployService.removeServer(id);
+      await deployService.removeServer(id);
       return { success: true };
     } catch (error: unknown) {
       const err = error as Error;

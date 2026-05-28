@@ -279,6 +279,8 @@ export interface AppSpec {
   config_schema?: InputDef[];
   output?: OutputConfig;
   permissions?: string[];
+  /** Whether this skill is allowed to create sub-agents (Agent/Task tools) */
+  allow_sub_agents?: boolean;
   mcp_server?: McpServerConfig;
   escalation?: EscalationConfig;
   /** Optional model recommendation from the spec author (informational only, not used at runtime) */

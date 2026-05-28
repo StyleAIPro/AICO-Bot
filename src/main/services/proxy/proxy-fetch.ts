@@ -18,9 +18,34 @@ import type net from 'node:net';
 import { URL } from 'node:url';
 import { spawn } from 'node:child_process';
 import { getEffectiveProxyUrl } from './proxy-agent';
+import { createLogger } from '../log';
+
+const logger = createLogger('Proxy');
+
+/**
+ * Custom error for proxy CONNECT handshake failures.
+ * Distinguished from transient network errors so the router can return
+ * a non-retryable HTTP status (400) instead of 500, preventing the SDK
+ * from entering a retry loop that wastes ~250 seconds.
+ */
+export class ProxyConnectError extends Error {
+  readonly name = 'ProxyConnectError';
+
+  constructor(
+    public readonly statusCode: number | null,
+    public readonly targetUrl: string,
+    public readonly proxyHost: string,
+    message: string,
+  ) {
+    super(message);
+  }
+}
 
 /** Default timeout for fetch calls (ms). */
 const DEFAULT_FETCH_TIMEOUT_MS = 30_000;
+
+/** Timeout for the CONNECT handshake phase with the proxy (ms). */
+const CONNECT_PHASE_TIMEOUT_MS = 10_000;
 
 /**
  * In-memory cache of proxy origins that require Negotiate/NTLM auth.
@@ -225,6 +250,7 @@ function fetchViaProxy(
   // If this proxy is known to require SSPI auth, skip CONNECT and use curl directly
   const proxyOrigin = extractProxyOrigin(proxyUrl);
   if (negotiateProxyCache.has(proxyOrigin)) {
+    logger.info(`Proxy ${proxyOrigin} requires SSPI auth, using curl directly`);
     return fetchViaCurl(targetUrl, init, proxyUrl, 'negotiate', timeoutMs);
   }
 
@@ -260,16 +286,33 @@ function fetchViaProxy(
       headers: proxyHeaders,
     });
 
+    const req = proxyReq;
+
+    // Shorter timeout for the CONNECT handshake phase
+    const connectTimer = setTimeout(() => {
+      req.destroy();
+      reject(
+        new ProxyConnectError(
+          null,
+          targetUrl,
+          `${proxy.hostname}:${proxy.port || 80}`,
+          `Proxy connection timed out after ${CONNECT_PHASE_TIMEOUT_MS / 1000}s: ${proxy.hostname}:${proxy.port || 80}`,
+        ),
+      );
+    }, CONNECT_PHASE_TIMEOUT_MS);
+
     proxyReq.on('connect', (res: http.IncomingMessage, socket: net.Socket, _head: Buffer) => {
       // Check CONNECT response — proxy must return 200 to establish tunnel
       if (res.statusCode !== 200) {
         clearTimeout(timeout);
+        clearTimeout(connectTimer);
 
         // Detect Negotiate/NTLM auth challenge and fall back to curl
         if (res.statusCode === 407) {
           const authScheme = detectProxyAuthChallenge(res.headers);
           if (authScheme) {
             negotiateProxyCache.add(proxyOrigin);
+            logger.info(`Proxy 407 with ${authScheme} auth, falling back to curl`);
             // Drain the 407 response body, then delegate to curl
             res.on('data', () => {});
             res.on('end', () => {
@@ -283,13 +326,22 @@ function fetchViaProxy(
 
         let body = '';
         res.on('data', (chunk: Buffer) => (body += chunk.toString()));
+        logger.warn(`Proxy CONNECT failed (${res.statusCode}) to ${target.hostname}`);
         res.on('end', () => {
           reject(
-            new Error(`Proxy CONNECT failed (${res.statusCode}): ${body.trim() || targetUrl}`),
+            new ProxyConnectError(
+              res.statusCode ?? null,
+              targetUrl,
+              `${proxy.hostname}:${proxy.port || 80}`,
+              `Proxy CONNECT failed (${res.statusCode}): ${body.trim() || targetUrl}`,
+            ),
           );
         });
         return;
       }
+
+      clearTimeout(connectTimer);
+      logger.info(`CONNECT tunnel established to ${target.hostname} via ${proxy.hostname}`);
 
       if (isHttps) {
         // Merge any early data from the tunnel into the TLS socket
@@ -356,21 +408,30 @@ function fetchViaProxy(
 
     proxyReq.on('error', (err: Error) => {
       clearTimeout(timeout);
-      reject(err);
+      clearTimeout(connectTimer);
+      reject(
+        new ProxyConnectError(
+          null,
+          targetUrl,
+          `${proxy.hostname}:${proxy.port || 80}`,
+          err.message,
+        ),
+      );
     });
-
-    const req = proxyReq;
 
     // Forward external AbortSignal
     const onExternalAbort = () => {
       clearTimeout(timeout);
+      clearTimeout(connectTimer);
       req.destroy();
       reject(new DOMException('The operation was aborted.', 'AbortError'));
     };
     init?.signal?.addEventListener('abort', onExternalAbort, { once: true });
 
-    // Clean up external signal listener when the request settles
+    // Clean up timers and external signal listener when the request settles
     proxyReq.on('close', () => {
+      clearTimeout(timeout);
+      clearTimeout(connectTimer);
       init?.signal?.removeEventListener('abort', onExternalAbort);
     });
 
@@ -441,9 +502,17 @@ export async function proxyFetch(
 ): Promise<Response> {
   const timeout = timeoutMs ?? DEFAULT_FETCH_TIMEOUT_MS;
   const effectiveProxyUrl = forceNoProxy ? undefined : getEffectiveProxyUrl();
+  const method = init?.method || 'GET';
+  const startTime = Date.now();
+
+  logger.info(
+    `${method} ${url} via=${effectiveProxyUrl ? `proxy(${effectiveProxyUrl})` : 'direct'} timeout=${timeout}ms`,
+  );
 
   if (effectiveProxyUrl) {
-    return fetchViaProxy(url, init, effectiveProxyUrl, timeout);
+    const response = await fetchViaProxy(url, init, effectiveProxyUrl, timeout);
+    logger.info(`Response ${response.status} (${((Date.now() - startTime) / 1000).toFixed(1)}s)`);
+    return response;
   }
 
   // No proxy — use native fetch with timeout
@@ -482,6 +551,7 @@ export async function proxyFetch(
       ...init,
       signal: controller.signal,
     });
+    logger.info(`Response ${response.status} (${((Date.now() - startTime) / 1000).toFixed(1)}s)`);
     return response;
   } catch (error: unknown) {
     if (error instanceof Error && error.name === 'AbortError') {

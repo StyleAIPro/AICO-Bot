@@ -81,6 +81,13 @@ interface InputAreaProps {
   isCompact?: boolean;
   spaceId?: string;
   conversationId?: string;
+  contextUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    contextWindow: number;
+  } | null;
 }
 
 export interface InputAreaRef {
@@ -100,6 +107,7 @@ function InputAreaInternal(
     isCompact = false,
     spaceId,
     conversationId,
+    contextUsage,
   }: InputAreaProps,
   ref: ForwardedRef<InputAreaRef>,
 ) {
@@ -128,6 +136,7 @@ function InputAreaInternal(
 
   // Space state - to determine if this is a local, remote, or hyper space
   const currentSpaceId = useSpaceStore((state) => state.currentSpace?.id);
+  const currentSpaceRemoteServerId = useSpaceStore((state) => state.currentSpace?.remoteServerId);
   const currentSpaceType = useSpaceStore((state) => {
     if (!state.currentSpace) return null;
     return {
@@ -236,6 +245,8 @@ function InputAreaInternal(
     setContent,
     textareaRef,
     onExecuteCommand: handleCommandResult,
+    claudeSource: currentSpaceType?.claudeSource,
+    remoteServerId: currentSpaceRemoteServerId,
   });
 
   // Input history (arrow key navigation through user messages)
@@ -660,6 +671,7 @@ function InputAreaInternal(
             activeKnowledgeBaseIds={activeKnowledgeBaseIds}
             onToggleKb={toggleActiveKb}
             activeCount={activeKnowledgeBaseIds.length}
+            contextUsage={contextUsage}
           />
         </div>
       </div>
@@ -668,6 +680,49 @@ function InputAreaInternal(
 }
 
 export const InputArea = forwardRef<InputAreaRef, InputAreaProps>(InputAreaInternal);
+
+function formatTokens(tokens: number): string {
+  if (tokens < 1000) return tokens.toString();
+  if (tokens < 10000) return `${(tokens / 1000).toFixed(1)}K`;
+  return `${Math.round(tokens / 1000)}K`;
+}
+
+function ContextUsageDisplay({
+  contextUsage,
+}: {
+  contextUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    contextWindow: number;
+  } | null;
+}) {
+  if (!contextUsage) {
+    return (
+      <span className="text-xs text-muted-foreground/30 cursor-default select-none pl-1">
+        -- / 200K
+      </span>
+    );
+  }
+
+  const contextUsed =
+    contextUsage.inputTokens +
+    contextUsage.outputTokens +
+    contextUsage.cacheReadTokens +
+    contextUsage.cacheCreationTokens;
+  const contextWindow = contextUsage.contextWindow > 0 ? contextUsage.contextWindow : 200000;
+  const usagePercent = Math.round((contextUsed / contextWindow) * 100);
+
+  const colorClass =
+    usagePercent >= 80 ? 'text-red-500/80' : usagePercent >= 60 ? 'text-amber-500/80' : 'text-muted-foreground/50';
+
+  return (
+    <span className={`text-xs cursor-default select-none pl-1 ${colorClass}`}>
+      {formatTokens(contextUsed)} / {formatTokens(contextWindow)} ({usagePercent}%)
+    </span>
+  );
+}
 
 /**
  * Input Toolbar - Bottom action bar
@@ -703,6 +758,13 @@ interface InputToolbarProps {
   activeKnowledgeBaseIds: string[];
   onToggleKb: (kbId: string) => void;
   activeCount: number;
+  contextUsage?: {
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    contextWindow: number;
+  } | null;
 }
 
 function InputToolbar({
@@ -733,6 +795,7 @@ function InputToolbar({
   activeKnowledgeBaseIds,
   onToggleKb,
   activeCount,
+  contextUsage,
 }: InputToolbarProps) {
   const { t } = useTranslation();
   return (
@@ -923,6 +986,9 @@ function InputToolbar({
             )}
           </div>
         )}
+
+        {/* Context usage indicator */}
+        <ContextUsageDisplay contextUsage={contextUsage} />
       </div>
 
       {/* Right section: pending indicator + action button */}

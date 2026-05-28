@@ -36,6 +36,7 @@ import { BrowserTaskCard, isBrowserTool } from '../tool/BrowserTaskCard';
 import { TaskMonitorCard, filterStreamingTaskMonitors } from '../tool/TaskMonitorCard';
 import type { TaskMonitorInfo } from '../tool/TaskMonitorCard';
 import { AskUserQuestionCard } from './AskUserQuestionCard';
+import { IdleTimeoutDialog } from './IdleTimeoutDialog';
 import { ToolPermissionCard } from './ToolPermissionCard';
 import type { Message, Thought, CompactInfo, AgentErrorType, PendingQuestion, ToolPermissionRequest } from '../../types';
 import type { WorkerSessionState } from '../../stores/chat.store';
@@ -320,6 +321,7 @@ interface StreamingRevision {
   onResolveToolPermission?: (approved: boolean) => void;
   workerSessions?: Map<string, WorkerSessionState>;
   onAnswerWorkerQuestion?: (agentId: string, answers: Record<string, string>) => void;
+  conversationId?: string;
 }
 
 function StreamingFooterContent({
@@ -329,7 +331,9 @@ function StreamingFooterContent({
 }) {
   // Subscribe to session changes so this component re-renders when thoughts/streaming update.
   // Data is read from the ref (always fresh); this selector just triggers the re-render.
-  useChatStore((s) => s.sessions.get(s.getCurrentSpaceState().currentConversationId ?? ''));
+  const currentConvId = useChatStore((s) => s.getCurrentSpaceState().currentConversationId ?? '');
+  useChatStore((s) => s.sessions.get(currentConvId));
+  const idleTimeout = useChatStore((s) => s.sessions.get(currentConvId)?.idleTimeout);
 
   const rev = revisionRef.current!;
   return (
@@ -342,6 +346,11 @@ function StreamingFooterContent({
             isThinking={rev.isThinking}
             workerSessions={rev.workerSessions}
           />
+        )}
+
+        {/* Idle timeout warning */}
+        {idleTimeout && currentConvId && (
+          <IdleTimeoutDialog conversationId={currentConvId} />
         )}
 
         {/* Real-time browser task card - shows AI browser operations as they happen */}

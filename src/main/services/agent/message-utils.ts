@@ -357,8 +357,7 @@ export function extractSingleUsage(assistantMsg: any): {
 /**
  * Extract token usage from result message
  * @param configuredContextWindow - User-configured context window from AI source settings.
- *   Used as the authoritative value instead of relying on SDK's modelUsage (which reports
- *   the model's default, not the custom value).
+ *   Takes highest priority. If not set, SDK's modelUsage.contextWindow is used. Falls back to 200K.
  */
 export function extractResultUsage(
   resultMsg: any,
@@ -375,23 +374,11 @@ export function extractResultUsage(
   const modelUsage = resultMsg.modelUsage as Record<string, { contextWindow?: number }> | undefined;
   const totalCostUsd = resultMsg.total_cost_usd as number | undefined;
 
-  // Priority: user-configured value > SDK's modelUsage.contextWindow > hardcoded 200K
-  // The SDK's modelUsage reports the model's default context window, not the custom
-  // value we pass via modelContextWindow. The configured value is the authoritative one.
-  let contextWindow = configuredContextWindow ?? 200000;
-  if (modelUsage?.contextWindow) {
-    // Only use SDK value if no configured value, or if SDK value is larger
-    const sdkContextWindow = Object.values(modelUsage)[0]?.contextWindow;
-    if (!configuredContextWindow && sdkContextWindow) {
-      contextWindow = sdkContextWindow;
-    } else if (
-      configuredContextWindow &&
-      sdkContextWindow &&
-      sdkContextWindow > configuredContextWindow
-    ) {
-      contextWindow = sdkContextWindow;
-    }
-  }
+  // Priority: user-configured > SDK modelUsage.contextWindow > 200K fallback
+  const sdkContextWindow = modelUsage
+    ? Object.values(modelUsage)[0]?.contextWindow
+    : undefined;
+  const contextWindow = configuredContextWindow ?? sdkContextWindow ?? 200000;
 
   // Use last API call usage (single) + cumulative cost
   if (lastSingleUsage) {

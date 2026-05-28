@@ -89,13 +89,13 @@ export async function fetchModelsFromApi(params: FetchModelsParams): Promise<Fet
   if (data.data && Array.isArray(data.data)) {
     models = data.data
       .filter((m: any) => typeof m.id === 'string')
-      .map((m: any) => ({ id: m.id, name: m.name || m.owned_by || m.id }));
+      .map((m: any) => ({ id: m.id, name: m.name || m.id }));
   }
   // Format 1b: { data: { data: [...] } } (nested/paginated wrapper)
   else if (data.data && typeof data.data === 'object' && !Array.isArray(data.data) && Array.isArray(data.data.data)) {
     models = data.data.data
       .filter((m: any) => typeof m.id === 'string')
-      .map((m: any) => ({ id: m.id, name: m.name || m.owned_by || m.id }));
+      .map((m: any) => ({ id: m.id, name: m.name || m.id }));
   }
   // Format 2: { models: [...] } (Ollama /api/tags, some Chinese providers)
   else if (data.models && Array.isArray(data.models)) {
@@ -107,7 +107,7 @@ export async function fetchModelsFromApi(params: FetchModelsParams): Promise<Fet
   else if (Array.isArray(data)) {
     models = data
       .filter((m: any) => typeof m.id === 'string')
-      .map((m: any) => ({ id: m.id, name: m.name || m.owned_by || m.id }));
+      .map((m: any) => ({ id: m.id, name: m.name || m.id }));
   }
   // Format 4: Fallback — scan all top-level array fields for {id: string} objects
   else if (typeof data === 'object' && data !== null) {
@@ -116,7 +116,7 @@ export async function fetchModelsFromApi(params: FetchModelsParams): Promise<Fet
       if (Array.isArray(value) && value.length > 0 && typeof value[0].id === 'string') {
         models = value
           .filter((m: any) => typeof m.id === 'string')
-          .map((m: any) => ({ id: m.id, name: m.name || m.owned_by || m.id }));
+          .map((m: any) => ({ id: m.id, name: m.name || m.id }));
         break;
       }
     }

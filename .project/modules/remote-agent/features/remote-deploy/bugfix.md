@@ -112,6 +112,13 @@
 - **根因**：`createDeployPackage()` 拼接 tar 参数时使用 Node.js 路径（含 `\`），Git Bash tar 将 `\` 视为转义符
 - **PRD**：`prd/bugfix/remote-agent/bugfix-tar-path-windows-backslash-v1.md`
 
+### 远程服务器管理 UX 三连修复
+- **严重程度**：P0/P1
+- **日期**：2026-05-13
+- **现象**：1) 删除服务器后列表不刷新，必须退出重进；2) 密码错误时无明确提示；3) 密码修改后卡在 "Checking proxy service..."
+- **根因**：1) IPC handler 未 await removeServer；2) SSH 认证错误未被专门识别；3) 密码更新后未清理缓存的 SSHManager，`_operationLock` 残留阻塞后续操作
+- **PRD**：`prd/bugfix/remote/bugfix-remote-server-ux-v1.md`
+
 ### SSH 断连后 UI 状态显示过期
 - **严重程度**：Major
 - **日期**：2026-05-10

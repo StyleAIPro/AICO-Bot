@@ -2,6 +2,9 @@
 
 | 日期 | 内容 | 指令人 | 触发来源 |
 |------|------|--------|---------|
+| 2026-05-14 | `syncLocalSkillToRemote()` 从覆盖式同步改为破坏式全量更新：上传前 `rm -rf` 远程 skill 目录，消除更新后旧文件残留 | @mi-saka | bugfix-remote-skill-destructive-full-update-v1 |
+| 2026-05-13 | 修复技能市场直接安装到远程服务器大文件导致 "unable to exec"：`installRemoteSkillDirect()` 文件上传和 META.json 上传从 base64 echo 改为 SFTP `writeFile()`，与 `syncLocalSkillToRemote` 保持一致 | @mi-saka | bugfix-remote-skill-direct-upload-large-file-v1 |
+| 2026-05-13 | 修复密码修改后重连不自动部署：提取 `ensureAgentReady()` 函数检测文件完整性/SDK 版本/Proxy 状态并按需部署，`connectServer` 在 `detectAgentInstalled` 后调用，使所有重连场景（密码修改、手动 Connect、网络恢复）统一自动部署 | @mi-saka | bugfix-remote-server-ux-v3 |
 | 2026-05-10 | 修复 SSH 断连后 UI 状态不更新：`SSHManager` 新增 `onDisconnect` 回调，`connectServer` 注册回调在断开时立即清理 `proxyRunning`/`apiReachable` 并通知 UI；`saveServers`/`loadServers` 不再持久化运行时状态字段 | @moonseeker | bugfix-remote-status-stale-v1 |
 | 2026-04-27 | 修复 SSH 命令执行无超时导致部署/更新卡死：`SSHManager` 三个执行方法添加默认超时（30s/600s），`disconnect()` 改为强制断开不排队，部署流程关键调用（npm install 5min、Node.js 安装 5min、tar 解压 2-5min）添加显式超时覆盖 | @MoonSeeker | bugfix-deploy-timeout-hang-v1 |
 | 2026-04-27 | 修复端口分配无总超时：`resolvePort()` 添加 2 分钟累积超时保护 | @MoonSeeker | bugfix-deploy-timeout-hang-v1 |

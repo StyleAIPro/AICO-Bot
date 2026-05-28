@@ -168,10 +168,29 @@ npm run build:win
 npm run build:win-x64
 ```
 
-`npm run build` 会执行两个步骤：
+`npm run build` 会执行以下步骤：
 
-1. `npm run build:proxy` — 构建 `packages/remote-agent-proxy/` 子包
-2. `electron-vite build` — 构建主进程、预加载脚本和渲染进程
+1. `build:proxy` — 编译 `packages/remote-agent-proxy/` TypeScript
+2. `build:patch-sdk` — 应用 SDK 补丁
+3. `build:offline-bundle` — 构建离线部署包（自动嵌入 EXE）
+4. `electron-vite build` — 构建主进程、预加载脚本和渲染进程
+
+### 单独构建离线部署包
+
+修改了 `packages/remote-agent-proxy/` 源码后，可单独重建离线部署包，无需完整构建：
+
+```powershell
+npm run build:offline-bundle
+```
+
+产物输出到 `resources/offline-bundles/`：
+
+| 文件 | 说明 |
+|------|------|
+| `aico-bot-offline-linux-x64.tar.xz` | Linux x64 离线包 |
+| `aico-bot-offline-linux-arm64.tar.xz` | Linux arm64 离线包 |
+
+> **注意**：单独构建离线包不会更新 EXE 安装包。需要完整构建（`npm run build:win`）才能将新离线包嵌入安装程序。
 
 构建产物：
 

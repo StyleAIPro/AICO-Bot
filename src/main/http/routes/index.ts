@@ -48,6 +48,8 @@ import { broadcastToAll } from '../websocket';
 import * as appController from '../../controllers/app.controller';
 import type { AppErrorCode } from '../../controllers/app.controller';
 import * as storeController from '../../controllers/store.controller';
+import * as skillController from '../../controllers/skill.controller';
+import multer from 'multer';
 
 // Helper: get working directory for a space
 function getWorkingDir(spaceId: string): string {
@@ -1530,6 +1532,60 @@ export function registerApiRoutes(app: Express, mainWindow: BrowserWindow | null
       res.status(500).json({ success: false, error: (error as Error).message });
     }
   });
+
+  // ===== Skill Routes (for remote Web mode) =====
+  const upload = multer({
+    storage: multer.memoryStorage(),
+    limits: { fileSize: 50 * 1024 * 1024 },
+  });
+
+  app.get('/api/skills', async (_req: Request, res: Response) => {
+    const result = await skillController.listInstalledSkills();
+    res.json(result);
+  });
+
+  app.post('/api/skills/toggle', async (req: Request, res: Response) => {
+    const { skillId, enabled } = req.body;
+    const result = await skillController.toggleSkill(skillId, enabled);
+    res.json(result);
+  });
+
+  app.post('/api/skills/uninstall', async (req: Request, res: Response) => {
+    const { skillId } = req.body;
+    const result = await skillController.uninstallSkill(skillId);
+    res.json(result);
+  });
+
+  app.post('/api/skills/refresh', async (_req: Request, res: Response) => {
+    const result = await skillController.refreshSkills();
+    res.json(result);
+  });
+
+  app.get('/api/skills/config', async (_req: Request, res: Response) => {
+    const result = await skillController.getSkillConfig();
+    res.json(result);
+  });
+
+  app.post(
+    '/api/skills/import-from-zip',
+    upload.single('file'),
+    async (req: Request, res: Response) => {
+      if (!req.file) {
+        res.status(400).json({ success: false, error: 'No file uploaded' });
+        return;
+      }
+
+      try {
+        const result = await skillController.importFromZipBuffer(req.file.buffer);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : 'Upload processing failed',
+        });
+      }
+    },
+  );
 
   console.log('[HTTP] API routes registered');
 }

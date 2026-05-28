@@ -5,6 +5,7 @@ import * as fs from 'fs'
 import type { ServerMessage, ClientMessage, RemoteServerConfig, ToolCallData, TerminalOutputData, ThoughtData, ThoughtDeltaData, HyperSpaceToolsConfig, AicoBotMcpToolDef } from './types.js'
 import { ClaudeManager, type ChatMessage, type ChatOptions, type ToolCall, type TerminalOutput, type ThoughtEvent, type ThoughtDeltaEvent } from './claude-manager.js'
 import { BackgroundTaskManager } from './background-tasks.js'
+import { log, logConversation, shortId, SCOPE } from './logger.js'
 
 /** Mask API key for safe logging (show first 8 chars only) */
 function maskKey(key?: string): string {
@@ -22,6 +23,7 @@ export class RemoteAgentServer {
     sessionId?: string  // Conversation ID
     sdkSessionId?: string  // SDK's real session ID for resumption
     authToken?: string  // The token used to authenticate this connection (for credential lookup)
+    ip?: string  // Client IP address
     // WebSocket MCP Bridge: tools registered by the AICO-Bot client
     aicoBotMcpTools?: Array<{ name: string; description: string; inputSchema: Record<string, any>; serverName: string }>
     aicoBotMcpCapabilities?: { aiBrowser: boolean; ghSearch: boolean; version?: number }
@@ -37,24 +39,29 @@ export class RemoteAgentServer {
 
   // Pending hyper-space tool approvals: toolId -> { resolve, reject }
   private pendingHyperSpaceTools = new Map<string, {
+    ws: WebSocket
     resolve: (result: string) => void
     reject: (error: Error) => void
   }>()
 
-  // Pending AskUserQuestion answers: questionId -> { resolve, reject }
+  // Pending AskUserQuestion answers: questionId -> { sessionId, resolve, reject }
   private pendingAskQuestions = new Map<string, {
+    ws: WebSocket
+    sessionId: string
     resolve: (answers: Record<string, string>) => void
     reject: (error: Error) => void
   }>()
 
-  // Pending tool permission requests: permissionId -> { resolve, reject }
+  // Pending tool permission requests: permissionId -> { sessionId, resolve, reject }
   private pendingPermissions = new Map<string, {
+    sessionId: string
     resolve: (approved: boolean) => void
     reject: (error: Error) => void
   }>()
 
   // Pending MCP tool calls: callId -> { resolve, reject }
   private pendingMcpToolCalls = new Map<string, {
+    ws: WebSocket
     resolve: (result: any) => void
     reject: (error: Error) => void
   }>()
@@ -91,7 +98,7 @@ export class RemoteAgentServer {
     if (this.tokensJsonPath) {
       this.loadTokensFromFile(this.tokensJsonPath)
     }
-    console.log(`[RemoteAgentServer] Auth configured: ${this.authTokens.size > 0 ? `yes (${this.authTokens.size} tokens)` : 'no (open access)'}`)
+    log.info(SCOPE.SERVER, `Auth configured: ${this.authTokens.size > 0 ? `yes (${this.authTokens.size} tokens)` : 'no (open access)'}`)
 
     // Use pathToClaudeCodeExecutable from config or environment variable
     // If not set, the SDK will use its default behavior (SDK mode)
@@ -140,7 +147,7 @@ export class RemoteAgentServer {
 
     const idleMs = Date.now() - this.lastClientActivity.getTime()
     if (idleMs >= RemoteAgentServer.IDLE_TIMEOUT_MS) {
-      console.log(`[RemoteAgentServer] No clients connected for 7 days, shutting down`)
+      log.info(SCOPE.SERVER, `No clients connected for 7 days, shutting down`)
       this.close()
       process.exit(0)
     }
@@ -148,6 +155,8 @@ export class RemoteAgentServer {
 
   private setupServer(): void {
     this.server.on('connection', (ws: WebSocket, req) => {
+      const clientIp = req.socket.remoteAddress || 'unknown'
+
       // Check for Authorization header authentication
       const authHeader = req.headers['authorization'] || req.headers['Authorization']
 
@@ -155,25 +164,25 @@ export class RemoteAgentServer {
         if (typeof authHeader === 'string') {
           const token = authHeader.split(' ')[1]
           if (token && this.authTokens.has(token)) {
-            console.log('Client authenticated via Authorization header')
-            this.clients.set(ws, { authenticated: true, authToken: token, lastClientActivityAt: Date.now() })
+            log.info(SCOPE.SERVER, `Client authenticated from ${clientIp}`)
+            this.clients.set(ws, { authenticated: true, authToken: token, ip: clientIp, lastClientActivityAt: Date.now() })
             this.lastClientActivity = new Date()
             ws.send(JSON.stringify({ type: 'auth:success' }))
           } else {
-            console.log('Authentication failed via Authorization header, closing connection')
+            log.warn(SCOPE.SERVER, `Auth failed from ${clientIp}, closing connection`)
             ws.close(1008, 'Unauthorized')
             return
           }
         } else {
-          this.clients.set(ws, { authenticated: false, lastClientActivityAt: Date.now() })
+          this.clients.set(ws, { authenticated: false, ip: clientIp, lastClientActivityAt: Date.now() })
         }
       } else {
         // No auth configured, auto-authenticate
-        console.log('No auth required, auto-authenticating')
-        this.clients.set(ws, { authenticated: true, lastClientActivityAt: Date.now() })
+        log.info(SCOPE.SERVER, `Client connected from ${clientIp} (no auth required)`)
+        this.clients.set(ws, { authenticated: true, ip: clientIp, lastClientActivityAt: Date.now() })
         this.lastClientActivity = new Date()
       }
-      console.log('New client connected')
+      log.info(SCOPE.SERVER, 'New client connected')
 
       ws.on('message', (data: Buffer) => {
         try {
@@ -189,22 +198,22 @@ export class RemoteAgentServer {
       })
 
       ws.on('error', (error) => {
-        console.error('WebSocket error:', error)
+        log.error(SCOPE.SERVER, `WebSocket error: ${error instanceof Error ? error.message : String(error)}`)
       })
     })
 
     this.server.on('listening', () => {
-      console.log(`Remote Agent Proxy server listening on port ${this.config.port}`)
+      log.info(SCOPE.SERVER, `Remote Agent Proxy server listening on port ${this.config.port}`)
       if (this.config.workDir) {
-        console.log(`Working directory: ${this.config.workDir}`)
+        log.info(SCOPE.SERVER, `Working directory: ${this.config.workDir}`)
       }
       if (this.config.maxThinkingTokens) {
-        console.log(`Max thinking tokens: ${this.config.maxThinkingTokens}`)
+        log.info(SCOPE.SERVER, `Max thinking tokens: ${this.config.maxThinkingTokens}`)
       }
     })
 
     this.server.on('error', (error) => {
-      console.error('Server error:', error)
+      log.error(SCOPE.SERVER, `Server error: ${error instanceof Error ? error.message : String(error)}`)
     })
 
     // Setup HTTP health endpoint on a separate port (WebSocket port + 1)
@@ -222,11 +231,11 @@ export class RemoteAgentServer {
               this.authTokens.add(token.trim())
             }
           }
-          console.log(`[RemoteAgentServer] Loaded ${tokens.length} tokens from ${filePath}`)
+          log.info(SCOPE.SERVER, `Loaded ${tokens.length} tokens from ${filePath}`)
         }
       }
     } catch (error) {
-      console.error(`[RemoteAgentServer] Failed to load tokens file:`, error)
+      log.error(SCOPE.SERVER, `Failed to load tokens file: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -235,7 +244,7 @@ export class RemoteAgentServer {
     try {
       fs.writeFileSync(this.tokensJsonPath, JSON.stringify([...this.authTokens], null, 2))
     } catch (error) {
-      console.error(`[RemoteAgentServer] Failed to save tokens file:`, error)
+      log.error(SCOPE.SERVER, `Failed to save tokens file: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -282,7 +291,7 @@ export class RemoteAgentServer {
             const added = !this.authTokens.has(token)
             this.authTokens.add(token)
             this.saveTokensToFile()
-            console.log(`[RemoteAgentServer] Token registered via HTTP (new: ${added}, total: ${this.authTokens.size})`)
+            log.info(SCOPE.SERVER, `Token registered via HTTP (new: ${added}, total: ${this.authTokens.size})`)
             res.writeHead(200, { 'Content-Type': 'application/json' })
             res.end(JSON.stringify({ success: true, added, totalTokens: this.authTokens.size }))
           } catch {
@@ -308,11 +317,11 @@ export class RemoteAgentServer {
     })
 
     this.httpServer.listen(healthPort, '0.0.0.0', () => {
-      console.log(`Health endpoint listening on port ${healthPort}`)
+      log.info(SCOPE.SERVER, `Health endpoint listening on port ${healthPort}`)
     })
 
     this.httpServer.on('error', (error) => {
-      console.error(`Health endpoint error:`, error)
+      log.error(SCOPE.SERVER, `Health endpoint error: ${error instanceof Error ? error.message : String(error)}`)
     })
   }
 
@@ -321,9 +330,19 @@ export class RemoteAgentServer {
    * API call with the provided credentials. Returns quickly with success/failure.
    */
   private handleHealthApiCheck(req: http.IncomingMessage, res: http.ServerResponse): void {
-    const timeout = setTimeout(() => {
-      res.writeHead(504, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'error', error: 'API check timed out' }))
+    let responseSent = false; // 防止双写响应
+
+    let timeout: NodeJS.Timeout;
+    const sendResponse = (statusCode: number, data: any) => {
+      if (responseSent) return;
+      responseSent = true;
+      clearTimeout(timeout);
+      res.writeHead(statusCode, { 'Content-Type': 'application/json' })
+      res.end(JSON.stringify(data))
+    }
+
+    timeout = setTimeout(() => {
+      sendResponse(504, { status: 'error', error: 'API check timed out' })
     }, 15000)
 
     let body = ''
@@ -333,8 +352,7 @@ export class RemoteAgentServer {
       try {
         const { apiKey, baseUrl, model } = JSON.parse(body)
         if (!apiKey) {
-          res.writeHead(400, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ status: 'error', error: 'Missing apiKey' }))
+          sendResponse(400, { status: 'error', error: 'Missing apiKey' })
           return
         }
 
@@ -363,28 +381,24 @@ export class RemoteAgentServer {
           apiRes.on('end', () => {
             const latency = Date.now() - start
             if (apiRes.statusCode && apiRes.statusCode >= 200 && apiRes.statusCode < 300) {
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ status: 'ok', model, latency }))
+              sendResponse(200, { status: 'ok', model, latency })
             } else {
               let errorMsg = `HTTP ${apiRes.statusCode}`
               try {
                 const parsed = JSON.parse(data)
                 errorMsg = parsed.error?.message || parsed.message || errorMsg
               } catch { /* use default */ }
-              res.writeHead(200, { 'Content-Type': 'application/json' })
-              res.end(JSON.stringify({ status: 'error', error: errorMsg, latency }))
+              sendResponse(200, { status: 'error', error: errorMsg, latency })
             }
           })
         })
 
         apiReq.on('timeout', () => {
           apiReq.destroy()
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ status: 'error', error: 'API request timed out', latency: Date.now() - start }))
+          sendResponse(200, { status: 'error', error: 'API request timed out', latency: Date.now() - start })
         })
         apiReq.on('error', (err) => {
-          res.writeHead(200, { 'Content-Type': 'application/json' })
-          res.end(JSON.stringify({ status: 'error', error: err.message, latency: Date.now() - start }))
+          sendResponse(200, { status: 'error', error: err.message, latency: Date.now() - start })
         })
 
         // Send a minimal messages request (max_tokens:1 to minimize token usage)
@@ -395,14 +409,11 @@ export class RemoteAgentServer {
         }))
         apiReq.end()
       } catch (err: any) {
-        res.writeHead(200, { 'Content-Type': 'application/json' })
-        res.end(JSON.stringify({ status: 'error', error: err.message || 'Invalid request' }))
+        sendResponse(200, { status: 'error', error: err.message || 'Invalid request' })
       }
     })
     req.on('error', () => {
-      clearTimeout(timeout)
-      res.writeHead(400, { 'Content-Type': 'application/json' })
-      res.end(JSON.stringify({ status: 'error', error: 'Request body read error' }))
+      sendResponse(400, { status: 'error', error: 'Request body read error' })
     })
   }
 
@@ -436,23 +447,20 @@ export class RemoteAgentServer {
       }
     } else if ((message.type as string) === 'claude:interrupt') {
       // Interrupt an active conversation
-      const sid = sessionId || client.sessionId
-      if (sid) {
-        console.log(`[RemoteAgentServer] Interrupt request for session: ${sid}`)
-        await this.handleClaudeInterrupt(sid)
+      if (sessionId) {
+        log.info(SCOPE.SERVER, `Interrupt request for session ${shortId(sessionId)}`)
+        await this.handleClaudeInterrupt(sessionId)
       }
     } else if (message.type === 'close:session') {
       // Clean up SDK session - called when client disconnects after stop
-      const sid = sessionId || client.sessionId
-      if (sid) {
-        console.log(`[RemoteAgentServer] Close session request for: ${sid}`)
-        this.claudeManager.removeSession(sid)
-        console.log(`[RemoteAgentServer] SDK session removed: ${sid}`)
+      if (sessionId) {
+        log.info(SCOPE.SERVER, `Close session request for ${shortId(sessionId)}`)
+        this.claudeManager.removeSession(sessionId)
+        log.info(SCOPE.SERVER, `SDK session removed: ${shortId(sessionId)}`)
       }
     } else if (message.type === 'claude:chat') {
       // API credentials are always provided per-request by the AICO-Bot client
-      const sid = sessionId || client.sessionId
-      if (!sid) {
+      if (!sessionId) {
         this.sendMessage(ws, {
           type: 'claude:error',
           sessionId,
@@ -460,7 +468,7 @@ export class RemoteAgentServer {
         })
         return
       }
-      await this.handleClaudeChat(ws, sid, message.payload)
+      await this.handleClaudeChat(ws, sessionId, message.payload)
     } else if (message.type === 'fs:stat') {
       // Session-less path stat — check if path exists and is a directory
       const path = message.payload?.path
@@ -492,8 +500,7 @@ export class RemoteAgentServer {
         this.sendMessage(ws, { type: 'fs:result', data: { success: false, error: err.message } })
       }
     } else if (['fs:list', 'fs:read', 'fs:write', 'fs:delete', 'fs:upload', 'fs:download'].includes(message.type)) {
-      const sid = sessionId || client.sessionId
-      if (!sid) {
+      if (!sessionId) {
         this.sendMessage(ws, {
           type: 'fs:error',
           sessionId,
@@ -501,7 +508,7 @@ export class RemoteAgentServer {
         })
         return
       }
-      await this.handleFileOperation(ws, sid, message.type, message.payload)
+      await this.handleFileOperation(ws, sessionId, message.type, message.payload)
     } else if (message.type === 'ping') {
       this.sendMessage(ws, { type: 'pong', sessionId })
     } else if (message.type === 'pong') {
@@ -513,17 +520,17 @@ export class RemoteAgentServer {
       // tool:approve back with the result. The pending promise is resolved here.
       const toolId = message.payload?.toolId
       if (!toolId) {
-        console.log(`[${message.type}] Missing toolId in payload`)
+        log.info(SCOPE.SERVER, `[${message.type}] Missing toolId in payload`)
         return
       }
       const pending = this.pendingHyperSpaceTools.get(toolId)
       if (pending) {
         this.pendingHyperSpaceTools.delete(toolId)
         if (message.type === 'tool:approve') {
-          console.log(`[tool:approve] Resolving hyper-space tool ${toolId}`)
+          log.info(SCOPE.SERVER, `Resolving hyper-space tool ${toolId}`)
           pending.resolve(message.payload?.result || 'OK')
         } else {
-          console.log(`[tool:reject] Rejecting hyper-space tool ${toolId}: ${message.payload?.reason}`)
+          log.info(SCOPE.SERVER, `Rejecting hyper-space tool ${toolId}: ${message.payload?.reason}`)
           pending.reject(new Error(message.payload?.reason || 'Tool rejected by client'))
         }
       } else {
@@ -533,10 +540,10 @@ export class RemoteAgentServer {
           this.pendingPermissions.delete(toolId)
           const approved = (message.payload as any)?.approved !== false
           // [DIAG-1.6] Log tool:approve for permission
-          console.log(`[DIAG][PermissionHandler] Received tool:approve for permission ${toolId}, approved=${approved}`)
+          log.info(SCOPE.SERVER, `Permission received tool:approve for permission ${toolId}, approved=${approved}`)
           permissionPending.resolve(approved)
         } else {
-          console.log(`[${message.type}] No pending tool or permission found for ID: ${toolId}`)
+          log.info(SCOPE.SERVER, `[${message.type}] No pending tool or permission found for ID: ${toolId}`)
         }
       }
     } else if (message.type === 'ask:answer') {
@@ -544,25 +551,29 @@ export class RemoteAgentServer {
       const questionId = message.payload?.id
       const answers = message.payload?.answers
       if (!questionId) {
-        console.log('[ask:answer] Missing id in payload')
+        log.info(SCOPE.SERVER, '[ask:answer] Missing id in payload')
         return
       }
       const pending = this.pendingAskQuestions.get(questionId)
       if (pending) {
         this.pendingAskQuestions.delete(questionId)
-        console.log(`[ask:answer] Resolving question ${questionId}`, answers)
+        log.info(SCOPE.SERVER, `Resolving question ${questionId}: ${JSON.stringify(answers)}`)
         pending.resolve(answers || {})
       } else {
-        console.log(`[ask:answer] No pending question found for id: ${questionId}`)
+        log.info(SCOPE.SERVER, `No pending question found for id: ${questionId}`)
       }
     } else if (message.type === 'mcp:tools:register') {
       // WebSocket MCP Bridge: AICO-Bot client registers its available MCP tools
-      const client = this.clients.get(ws)
-      if (client) {
-        client.aicoBotMcpTools = message.payload?.tools
-        client.aicoBotMcpCapabilities = message.payload?.aicoBotMcpCapabilities
-        console.log(`[MCP Bridge] AICO-Bot client registered ${client.aicoBotMcpTools?.length || 0} MCP tools, capabilities: ${JSON.stringify(client.aicoBotMcpCapabilities)}`)
-      }
+      client.aicoBotMcpTools = message.payload?.tools
+      const maybeCapabilities = message.payload?.aicoBotMcpCapabilities
+      client.aicoBotMcpCapabilities =
+        maybeCapabilities &&
+        typeof maybeCapabilities === 'object' &&
+        'aiBrowser' in maybeCapabilities &&
+        'ghSearch' in maybeCapabilities
+          ? maybeCapabilities
+          : undefined
+      log.info(SCOPE.SERVER, `AICO-Bot client registered ${client.aicoBotMcpTools?.length || 0} MCP tools, capabilities: ${JSON.stringify(client.aicoBotMcpCapabilities)}`)
     } else if (message.type === 'mcp:tool:response') {
       // WebSocket MCP Bridge: AICO-Bot client returns tool execution result
       const callId = message.payload?.callId
@@ -572,7 +583,7 @@ export class RemoteAgentServer {
           this.pendingMcpToolCalls.delete(callId)
           pending.resolve(message.payload?.toolResult)
         } else {
-          console.warn(`[MCP Bridge] No pending tool call found for callId: ${callId}`)
+          log.warn(SCOPE.SERVER, `No pending tool call found for callId: ${callId}`)
         }
       }
     } else if (message.type === 'mcp:tool:error') {
@@ -584,7 +595,7 @@ export class RemoteAgentServer {
           this.pendingMcpToolCalls.delete(callId)
           pending.reject(new Error(message.payload?.toolError || 'MCP tool error'))
         } else {
-          console.warn(`[MCP Bridge] No pending tool call found for callId: ${callId} (error)`)
+          log.warn(SCOPE.SERVER, `No pending tool call found for callId: ${callId} (error)`)
         }
       }
     } else if (message.type === 'task:list') {
@@ -611,7 +622,7 @@ export class RemoteAgentServer {
           client.authenticated = true
           client.authToken = token
           this.sendMessage(ws, { type: 'auth:success' })
-          console.log('Client authenticated')
+          log.info(SCOPE.SERVER, 'Client authenticated')
         }
       } else {
         this.sendMessage(ws, {
@@ -625,7 +636,7 @@ export class RemoteAgentServer {
       if (client) {
         client.authenticated = true
         this.sendMessage(ws, { type: 'auth:success' })
-        console.log('Client authenticated (no auth required)')
+        log.info(SCOPE.SERVER, 'Client authenticated (no auth required)')
       }
     }
   }
@@ -635,7 +646,7 @@ export class RemoteAgentServer {
    */
   private async handleClaudeInterrupt(sessionId: string): Promise<void> {
     try {
-      console.log(`[RemoteAgentServer] Handling interrupt for session: ${sessionId}`)
+      log.info(SCOPE.SERVER, `Handling interrupt for session ${shortId(sessionId)}`)
 
       // Mark session as interrupted (for streamChat loop to detect via poll)
       this.claudeManager.markAsInterrupted(sessionId)
@@ -650,37 +661,49 @@ export class RemoteAgentServer {
       // 4. The SDK subprocess will continue running (idle), ready for session reuse
       const forceAborted = this.claudeManager.forceAbortStreamIterator(sessionId)
       if (forceAborted) {
-        console.log(`[RemoteAgentServer] Stream iterator force aborted for: ${sessionId}`)
+        log.info(SCOPE.SERVER, `Stream iterator force aborted for ${shortId(sessionId)}`)
       }
     } catch (error) {
-      console.error(`[RemoteAgentServer] Interrupt error for session ${sessionId}:`, error)
+      log.error(SCOPE.SERVER, `Interrupt error for session ${shortId(sessionId)}: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
   private async handleClaudeChat(ws: WebSocket, sessionId: string, payload: any): Promise<void> {
     // Per-session lock variables — declared here so finally block can access them
     let resolveLock: (() => void) | undefined
+    let globalTimer: ReturnType<typeof setTimeout> | undefined
+    let aliveTimer: ReturnType<typeof setInterval> | undefined
+    // Generation ID helper — declared here so catch block can access it
+    let generationId: string | undefined = payload?.generationId
+    const startTime = Date.now()
+    const sendEvent = (type: string, data?: any) => {
+      const msg: any = { type, sessionId, generationId, data };
+      this.sendMessage(ws, msg)
+    }
     try {
       const { messages, options, stream = true } = payload
       const client = this.clients.get(ws)
+      const clientIp = client?.ip || 'unknown'
 
       if (!messages || !Array.isArray(messages)) {
-        this.sendMessage(ws, {
-          type: 'claude:error',
-          sessionId,
-          data: { error: 'Invalid messages format' }
-        })
+        sendEvent('claude:error', { error: 'Invalid messages format' })
         return
       }
+
+      // Log user message summary
+      const lastUserMsg = messages.filter((m: any) => m.role === 'user').pop()
+      const userPreview = lastUserMsg?.content
+        ? String(lastUserMsg.content).substring(0, 200).replace(/[\r\n]+/g, ' ')
+        : '(no user content)'
 
       // Extract sdkSessionId from options for session resumption
       const sdkSessionIdForResume = options?.sdkSessionId
 
-      console.log(`[RemoteAgentServer] Received claude:chat request for session ${sessionId} with ${messages.length} messages`)
-      console.log(`[RemoteAgentServer] options.workDir = ${options?.workDir || 'not provided'}`)
-      console.log(`[RemoteAgentServer] options.maxThinkingTokens = ${options?.maxThinkingTokens || 'not provided'}`)
-      console.log(`[RemoteAgentServer] options.system = ${options?.system ? options.system.substring(0, 100) + '...' : 'not provided'}`)
-      console.log(`[RemoteAgentServer] SDK session resumption: ${sdkSessionIdForResume || 'new session'}`)
+      log.info(SCOPE.SERVER, `Received claude:chat request for session ${shortId(sessionId)} with ${messages.length} messages`)
+      log.info(SCOPE.SERVER, `options.workDir = ${options?.workDir || 'not provided'}`)
+      log.info(SCOPE.SERVER, `options.maxThinkingTokens = ${options?.maxThinkingTokens || 'not provided'}`)
+      log.info(SCOPE.SERVER, `options.system = ${options?.system ? options.system.substring(0, 100) + '...' : 'not provided'}`)
+      log.info(SCOPE.SERVER, `SDK session resumption: ${sdkSessionIdForResume ? shortId(sdkSessionIdForResume) : 'new session'}`)
 
       // Credentials are always provided per-request by the AICO-Bot client.
       // No token-bound or instance-level credential resolution needed.
@@ -704,7 +727,13 @@ export class RemoteAgentServer {
         return { role, content }
       })
 
-      console.log(`[RemoteAgentServer] Processing chat with ${chatMessages.length} messages for session ${sessionId}`)
+      log.info(SCOPE.SERVER, `Processing chat with ${chatMessages.length} messages for session ${shortId(sessionId)} from ${clientIp}`)
+      logConversation(`User input for session ${shortId(sessionId)}: ${userPreview}`)
+      logConversation(`RequestHandler: incoming chat provider=${options?.provider || 'unknown'} model=${options?.model || 'default'} baseUrl=${options?.baseUrl || 'default'} apiKey=${options?.apiKey ? String(options.apiKey).substring(0, 8) + '...' : '(none)'} from=${clientIp}`)
+
+      if (generationId) {
+        log.info(SCOPE.SERVER, `Generation ID: ${generationId}`)
+      }
 
       // Per-session lock: prevent concurrent streamChat calls for the same session.
       // Without this, the gap between isActive() check and registerActiveSession()
@@ -714,7 +743,7 @@ export class RemoteAgentServer {
         const lastMessage = chatMessages[chatMessages.length - 1]
         if (lastMessage?.role === 'user') {
           this.claudeManager.queueMessage(sessionId, lastMessage.content, resolvedOptions)
-          console.log(`[RemoteAgentServer] Session ${sessionId} already processing, queued message`)
+          log.info(SCOPE.SERVER, `Session ${shortId(sessionId)} already processing, queued message`)
         }
         return
       }
@@ -723,9 +752,36 @@ export class RemoteAgentServer {
       this.sessionProcessingLocks.set(sessionId, lockPromise)
 
       if (stream) {
+        // Track current tool for stream:alive heartbeat
+        let currentToolName: string | undefined
+        let currentToolStartTime: number | undefined
+        const streamStartTime = Date.now()
+        // Track accumulated text and tool calls for conversation summary
+        let accumulatedText = ''
+        let toolCallCount = 0
+
+        // Register process exit callback — notify client immediately when SDK dies
+        this.claudeManager.registerSessionExitCallback(sessionId, (reason: string) => {
+          log.error(SCOPE.SERVER, `SDK process died for session ${shortId(sessionId)}: ${reason}`)
+          this.sendMessage(ws, {
+            type: 'claude:error',
+            sessionId,
+            data: { error: `SDK process crashed: ${reason}`, isProcessDeath: true }
+          })
+        })
+
         // Callbacks for tool and terminal events
         const onToolCall = (tool: ToolCall) => {
-          console.log(`[RemoteAgentServer] Tool ${tool.status}: ${tool.name || 'unknown'}`)
+          log.info(SCOPE.SERVER, `Tool ${tool.status}: ${tool.name || 'unknown'}`)
+          if (tool.status === 'running' || tool.status === 'started') toolCallCount++
+          // Update tool tracking for stream:alive
+          if (tool.status === 'running' || tool.status === 'started') {
+            currentToolName = tool.name
+            currentToolStartTime = Date.now()
+          } else if (tool.status === 'result' || tool.status === 'error') {
+            currentToolName = undefined
+            currentToolStartTime = undefined
+          }
           // Determine message type based on tool status
           let messageType: 'tool:call' | 'tool:result' | 'tool:error'
           if (tool.status === 'error') {
@@ -735,58 +791,34 @@ export class RemoteAgentServer {
           } else {
             messageType = 'tool:call'
           }
-          this.sendMessage(ws, {
-            type: messageType,
-            sessionId,
-            data: tool
-          })
+          sendEvent(messageType, tool)
         }
 
         const onTerminalOutput = (output: TerminalOutput) => {
-          this.sendMessage(ws, {
-            type: 'terminal:output',
-            sessionId,
-            data: output
-          })
+          sendEvent('terminal:output', output)
         }
 
         // Callback for thought events (thinking, tool_use, etc.)
         const onThought = (thought: ThoughtEvent) => {
-          this.sendMessage(ws, {
-            type: 'thought',
-            sessionId,
-            data: thought
-          })
+          sendEvent('thought', thought)
         }
 
         // Callback for thought delta events (streaming updates)
         const onThoughtDelta = (delta: ThoughtDeltaEvent) => {
-          this.sendMessage(ws, {
-            type: 'thought:delta',
-            sessionId,
-            data: delta
-          })
+          sendEvent('thought:delta', delta)
         }
 
         // Callback for MCP status events
         const onMcpStatus = (data: { servers: Array<{ name: string; status: string }> }) => {
-          this.sendMessage(ws, {
-            type: 'mcp:status',
-            sessionId,
-            data: data
-          })
+          sendEvent('mcp:status', data)
         }
 
         // Callback for compact boundary events
         const onCompact = (data: { trigger: 'manual' | 'auto'; preTokens: number }) => {
-          this.sendMessage(ws, {
-            type: 'compact:boundary',
-            sessionId,
-            data: data
-          })
+          sendEvent('compact:boundary', data)
         }
 
-        console.log(`[RemoteAgentServer] Starting stream for session ${sessionId}`)
+        log.info(SCOPE.SERVER, `Starting stream for session ${shortId(sessionId)}`)
         let wasInterrupted = false
 
         // Hyper Space tool execution — legacy bridge mode for old AICO-Bot clients
@@ -806,13 +838,9 @@ export class RemoteAgentServer {
         // AskUserQuestion handler — forward question to AICO-Bot client, wait for answer
         const onAskUserQuestion = (id: string, questions: Array<{ question: string; header: string; options: Array<{ label: string; description: string }>; multiSelect: boolean }>) => {
           return new Promise<Record<string, string>>((resolve, reject) => {
-            this.pendingAskQuestions.set(id, { resolve, reject })
+            this.pendingAskQuestions.set(id, { ws, sessionId, resolve, reject })
             // Send question to AICO-Bot client
-            this.sendMessage(ws, {
-              type: 'ask:question',
-              sessionId,
-              data: { id, questions }
-            })
+            sendEvent('ask:question', { id, questions })
             // 10 minute timeout for user response
             setTimeout(() => {
               if (this.pendingAskQuestions.has(id)) {
@@ -826,9 +854,9 @@ export class RemoteAgentServer {
         // Permission request handler — forward to AICO-Bot client, wait for user approval/deny
         const onPermissionRequest = (id: string, toolName: string, toolInput: Record<string, unknown>) => {
           return new Promise<boolean>((resolve, reject) => {
-            this.pendingPermissions.set(id, { resolve, reject })
+            this.pendingPermissions.set(id, { sessionId, resolve, reject })
             // [DIAG-1.6] Log permission:request send
-            console.log(`[DIAG][PermissionHandler] Sending permission:request to client: id=${id}, tool=${toolName}, sessionId=${sessionId}`)
+            log.info(SCOPE.SERVER, `Sending permission:request to client: id=${id}, tool=${toolName}, sessionId=${shortId(sessionId)}`)
             // Send permission request to AICO-Bot client
             this.sendMessage(ws, {
               type: 'permission:request',
@@ -879,6 +907,36 @@ export class RemoteAgentServer {
           isFirstIteration = false
           }
 
+          // Global stream timeout — absolute upper bound for a single stream iteration
+          const STREAM_GLOBAL_TIMEOUT_MS = currentOptions?.globalTimeoutMs ?? 2 * 60 * 60 * 1000; // default 2 hours
+          if (STREAM_GLOBAL_TIMEOUT_MS > 0) {
+            globalTimer = setTimeout(() => {
+              log.error(SCOPE.SERVER, `Stream global timeout (${STREAM_GLOBAL_TIMEOUT_MS / 60000}min) for session ${shortId(sessionId)}`)
+              this.sendMessage(ws, {
+                type: 'claude:error',
+                sessionId,
+                data: { error: `Stream global timeout (${Math.round(STREAM_GLOBAL_TIMEOUT_MS / 60000)} minutes)`, isGlobalTimeout: true }
+              })
+              this.claudeManager.forceAbortStreamIterator(sessionId)
+            }, STREAM_GLOBAL_TIMEOUT_MS)
+          }
+
+          // Stream alive heartbeat — every 5 minutes, proves Agent is still working
+          const ALIVE_INTERVAL_MS = 5 * 60 * 1000
+          aliveTimer = setInterval(() => {
+            const elapsed = Date.now() - streamStartTime
+            this.sendMessage(ws, {
+              type: 'stream:alive',
+              sessionId,
+              data: {
+                elapsedMs: elapsed,
+                currentToolName,
+                currentToolElapsedMs: currentToolStartTime ? Date.now() - currentToolStartTime : undefined,
+              } satisfies import('./types').StreamAliveData
+            })
+            log.info(SCOPE.SERVER, `stream:alive for ${shortId(sessionId)} — ${Math.round(elapsed / 60000)}min, tool=${currentToolName || 'none'}`)
+          }, ALIVE_INTERVAL_MS)
+
           for await (const chunk of this.claudeManager.streamChat(
             sessionId,
             currentChatMessages,
@@ -898,79 +956,75 @@ export class RemoteAgentServer {
           )) {
             // Auth retry detected — signal for session rebuild after stream ends
             if (chunk.type === 'auth_retry_required') {
+              // Notify client about the auth error before silent retry
+              sendEvent('claude:api-warning', {
+                error: `API 认证失败 (HTTP ${chunk.data.errorStatus}): ${chunk.data.error}`,
+                errorStatus: chunk.data.errorStatus,
+                isAuthRetry: true,
+                attempt: chunk.data.attempt,
+                maxRetries: chunk.data.maxRetries
+              })
               needsAuthRetry = true
-              continue  // Don't forward to client
+              continue
+            }
+            // Non-401 API errors — forward to client immediately
+            if (chunk.type === 'api_error') {
+              sendEvent('claude:api-warning', {
+                error: `API 错误 (HTTP ${chunk.data.errorStatus}): ${chunk.data.error}`,
+                errorStatus: chunk.data.errorStatus,
+                attempt: chunk.data.attempt,
+                maxRetries: chunk.data.maxRetries
+              })
+              continue
             }
             if (chunk.type === 'text') {
-              // Send text delta in format expected by client
-              this.sendMessage(ws, {
-                type: 'claude:stream',
-                sessionId,
-                data: { text: chunk.data?.text || '' }
-              })
+              accumulatedText += chunk.data?.text || ''
+              sendEvent('claude:stream', { text: chunk.data?.text || '' })
             } else if (chunk.type === 'text_block_start') {
               // Send text block start signal
-              this.sendMessage(ws, {
-                type: 'text:block-start',
-                sessionId,
-                data: {}
-              })
+              sendEvent('text:block-start', {})
             } else if (chunk.type === 'session_id') {
               // Send SDK session_id to client for session resumption
               const newSdkSessionId = chunk.data?.sessionId
-              console.log(`[RemoteAgentServer] Forwarding SDK session_id: ${newSdkSessionId}`)
-              this.sendMessage(ws, {
-                type: 'claude:session',
-                sessionId,
-                data: { sdkSessionId: newSdkSessionId }
-              })
+              log.debug(SCOPE.SERVER, `Forwarding SDK session_id: ${newSdkSessionId}`)
+              sendEvent('claude:session', { sdkSessionId: newSdkSessionId })
               // Update client's SDK session ID for next request
               if (client && newSdkSessionId) {
                 client.sdkSessionId = newSdkSessionId
-                console.log(`[RemoteAgentServer] Updated SDK session ID: ${newSdkSessionId}`)
+                log.debug(SCOPE.SERVER, `Updated SDK session ID: ${newSdkSessionId}`)
               }
             } else if (chunk.type === 'usage') {
               // Send token usage to client
-              this.sendMessage(ws, {
-                type: 'claude:usage',
-                sessionId,
-                data: chunk.data
-              })
+              sendEvent('claude:usage', chunk.data)
+            } else if (chunk.type === 'context-usage') {
+              // Send real-time context usage to client
+              sendEvent('claude:context-usage', chunk.data)
             } else if (chunk.type === 'worker:started') {
               // Forward subagent worker started event
-              this.sendMessage(ws, {
-                type: 'worker:started',
-                sessionId,
-                data: chunk.data
-              })
+              sendEvent('worker:started', chunk.data)
             } else if (chunk.type === 'worker:completed') {
               // Forward subagent worker completed event
-              this.sendMessage(ws, {
-                type: 'worker:completed',
-                sessionId,
-                data: chunk.data
-              })
+              sendEvent('worker:completed', chunk.data)
             }
             // Other event types (tool_call, tool_result, terminal, thought) are sent via callbacks
           }
 
+          if (globalTimer) clearTimeout(globalTimer)
+          if (aliveTimer) clearInterval(aliveTimer)
+
           // Check if auth retry is needed (after stream completes)
           if (needsAuthRetry && authRetries < MAX_AUTH_RETRIES) {
             authRetries++
-            console.warn(`[RemoteAgentServer] Auth retry #${authRetries} for session ${sessionId}: rebuilding session`)
+            log.warn(SCOPE.SERVER, `Auth retry #${authRetries} for session ${shortId(sessionId)}: rebuilding session`)
 
             // Notify client about auth recovery
-            this.sendMessage(ws, {
-              type: 'auth_retry',
-              sessionId,
-              data: { attempt: authRetries, maxRetries: MAX_AUTH_RETRIES }
-            })
+            sendEvent('auth_retry', { attempt: authRetries, maxRetries: MAX_AUTH_RETRIES })
 
             // Force session rebuild — next streamChat call creates fresh session
             this.claudeManager.forceSessionRebuild(sessionId)
           }
           } while (needsAuthRetry && authRetries < MAX_AUTH_RETRIES)
-          console.log(`[RemoteAgentServer] Stream completed for session ${sessionId}`)
+          log.info(SCOPE.SERVER, `Stream completed for session ${shortId(sessionId)}`)
 
           // Check for pending messages queued during streaming
           const pending = this.claudeManager.consumePendingMessages(sessionId)
@@ -981,7 +1035,7 @@ export class RemoteAgentServer {
           // Without this check, the old handler consumes new client's messages
           // and sends responses to the dead ws, causing the new client to hang forever.
           if (ws.readyState !== WebSocket.OPEN) {
-            console.log(`[RemoteAgentServer] WebSocket dead with ${pending.length} pending message(s), putting back for new connection`)
+            log.info(SCOPE.SERVER, `WebSocket dead with ${pending.length} pending message(s), putting back for new connection`)
             for (const msg of pending) {
               this.claudeManager.queueMessage(sessionId, msg.content, msg.options)
             }
@@ -995,31 +1049,33 @@ export class RemoteAgentServer {
           }
           currentChatMessages = [{ role: 'user' as const, content: nextMsg.content }]
           currentOptions = nextMsg.options || resolvedOptions
-          console.log(`[RemoteAgentServer] Processing ${pending.length} pending message(s) for session ${sessionId}`)
+          log.info(SCOPE.SERVER, `Processing ${pending.length} pending message(s) for session ${shortId(sessionId)}`)
           } // end while (pending messages loop)
         } catch (streamError) {
+          if (globalTimer) clearTimeout(globalTimer)
+          if (aliveTimer) clearInterval(aliveTimer)
           // Check if this is an expected interrupt
           const errorMessage = streamError instanceof Error ? streamError.message : String(streamError)
           if (errorMessage === 'Stream interrupted' || errorMessage === 'Stream aborted') {
             // Expected interrupt - mark and continue normally
             wasInterrupted = true
-            console.log(`[RemoteAgentServer] Stream interrupted for session ${sessionId}`)
+            log.info(SCOPE.SERVER, `Stream interrupted for session ${shortId(sessionId)}`)
           } else if (errorMessage.includes('SESSION_CORRUPTED') && !needsClosedSessionRetry) {
             // First-event timeout: session was corrupted after interrupt reuse.
             // Force rebuild (skip resume) and retry once.
-            console.warn(`[RemoteAgentServer] Session corrupted (first-event timeout) for session ${sessionId}, rebuilding and retrying...`)
+            log.warn(SCOPE.SERVER, `Session corrupted (first-event timeout) for session ${shortId(sessionId)}, rebuilding and retrying...`)
             this.claudeManager.forceSessionRebuild(sessionId)
             needsClosedSessionRetry = true
           } else if (errorMessage.includes('Cannot send to closed session') && !wasInterrupted && !needsClosedSessionRetry) {
             // Race condition: close:session arrived concurrently and closed the SDK session
             // before/during session.send(). Rebuild session and retry once.
-            console.warn(`[RemoteAgentServer] Closed session race detected for session ${sessionId}, rebuilding and retrying...`)
+            log.warn(SCOPE.SERVER, `Closed session race detected for session ${shortId(sessionId)}, rebuilding and retrying...`)
             this.claudeManager.forceSessionRebuild(sessionId)
             needsClosedSessionRetry = true
             // Don't re-throw — let execution continue to interrupt check + complete below
           } else {
             // Unexpected error - log and re-throw
-            console.error(`[RemoteAgentServer] Stream error for session ${sessionId}:`, streamError)
+            log.error(SCOPE.SERVER, `Stream error for session ${shortId(sessionId)}: ${streamError instanceof Error ? streamError.message : String(streamError)}`)
             throw streamError
           }
         }
@@ -1027,54 +1083,56 @@ export class RemoteAgentServer {
         // Check if session was interrupted (set by streamChat when interrupt detected)
         if (this.claudeManager.checkAndClearInterrupt(sessionId)) {
           wasInterrupted = true
-          console.log(`[RemoteAgentServer] Interrupt detected after streamChat for session ${sessionId}`)
+          log.info(SCOPE.SERVER, `Interrupt detected after streamChat for session ${shortId(sessionId)}`)
         }
 
-        // Reject any pending AskUserQuestion when stream ends
+        // Reject pending AskUserQuestion for THIS session only when stream ends
         for (const [id, pending] of this.pendingAskQuestions) {
-          pending.reject(new Error('Stream ended'))
-          this.pendingAskQuestions.delete(id)
+          if (pending.sessionId === sessionId) {
+            pending.reject(new Error('Stream ended'))
+            this.pendingAskQuestions.delete(id)
+          }
         }
 
-        // Reject any pending permission requests when stream ends
+        // Reject pending permission requests for THIS session only when stream ends
         for (const [id, pending] of this.pendingPermissions) {
-          pending.reject(new Error('Stream ended'))
-          this.pendingPermissions.delete(id)
+          if (pending.sessionId === sessionId) {
+            pending.reject(new Error('Stream ended'))
+            this.pendingPermissions.delete(id)
+          }
         }
 
         // Only send claude:complete if not interrupted
         if (!wasInterrupted) {
-          console.log(`[RemoteAgentServer] Chat completed for session ${sessionId}`)
-          this.sendMessage(ws, {
-            type: 'claude:complete',
-            sessionId
-          })
+          const elapsed = ((Date.now() - startTime) / 1000).toFixed(1)
+          log.info(SCOPE.SERVER, `Chat completed for session ${shortId(sessionId)} from ${clientIp} (${elapsed}s)`)
+          const outputPreview = accumulatedText
+            ? accumulatedText.substring(0, 200).replace(/[\r\n]+/g, ' ')
+            : '(empty)'
+          logConversation(
+            `Model output for session ${shortId(sessionId)}: ${outputPreview} | ${toolCallCount} tool call(s) | ${elapsed}s`
+          )
+          sendEvent('claude:complete')
         } else {
-          console.log(`[RemoteAgentServer] Chat interrupted for session ${sessionId}`)
+          log.info(SCOPE.SERVER, `Chat interrupted for session ${shortId(sessionId)}`)
         }
       } else {
         // Non-streaming mode
         const response = await this.claudeManager.chat(sessionId, chatMessages, options)
-        this.sendMessage(ws, {
-          type: 'claude:complete',
-          sessionId,
-          data: { content: response }
-        })
+        sendEvent('claude:complete', { content: response })
       }
     } catch (error) {
       // Clear pending messages on error to prevent stale queue
       this.claudeManager.clearPendingMessages(sessionId)
-      console.error(`[RemoteAgentServer] Chat error for session ${sessionId}:`, error)
-      console.error(`[RemoteAgentServer] Error details:`, error instanceof Error ? {
-        message: error.message,
-        stack: error.stack
-      } : String(error))
-      this.sendMessage(ws, {
-        type: 'claude:error',
-        sessionId,
-        data: { error: error instanceof Error ? error.message : String(error) }
-      })
+      log.error(SCOPE.SERVER, `Chat error for session ${shortId(sessionId)}: ${error instanceof Error ? error.message : String(error)}`)
+      if (error instanceof Error && error.stack) {
+        log.error(SCOPE.SERVER, `Stack: ${error.stack}`)
+      }
+      sendEvent('claude:error', { error: error instanceof Error ? error.message : String(error) })
     } finally {
+      if (globalTimer) clearTimeout(globalTimer)
+      if (aliveTimer) clearInterval(aliveTimer)
+      this.claudeManager.unregisterSessionExitCallback(sessionId)
       // Release per-session lock to allow next message to be processed
       if (resolveLock) {
         this.sessionProcessingLocks.delete(sessionId)
@@ -1126,7 +1184,7 @@ export class RemoteAgentServer {
     try {
       ws.send(JSON.stringify(message))
     } catch (error) {
-      console.error('Failed to send message:', error)
+      log.error(SCOPE.SERVER, `Failed to send message: ${error instanceof Error ? error.message : String(error)}`)
     }
   }
 
@@ -1165,6 +1223,7 @@ export class RemoteAgentServer {
       }, timeoutMs)
 
       this.pendingHyperSpaceTools.set(toolId, {
+        ws,
         resolve: (result: string) => {
           clearTimeout(timer)
           resolve(result)
@@ -1188,7 +1247,7 @@ export class RemoteAgentServer {
         }
       })
 
-      console.log(`[HyperSpace] Sent tool invocation to client: ${toolName} (${toolId})`)
+      log.info(SCOPE.SERVER, `Sent hyper-space tool invocation to client: ${toolName} (${toolId})`)
     })
   }
 
@@ -1220,6 +1279,7 @@ export class RemoteAgentServer {
       }, timeoutMs)
 
       this.pendingMcpToolCalls.set(callId, {
+        ws,
         resolve: (result: any) => {
           clearTimeout(timer)
           resolve(result)
@@ -1240,7 +1300,7 @@ export class RemoteAgentServer {
         }
       })
 
-      console.log(`[MCP Bridge] Sent tool call to AICO-Bot: ${toolName} (callId=${callId})`)
+      log.info(SCOPE.SERVER, `Sent MCP tool call to AICO-Bot: ${toolName} (callId=${callId})`)
     })
   }
 
@@ -1258,7 +1318,7 @@ export class RemoteAgentServer {
         if (!client.authenticated || ws.readyState !== WebSocket.OPEN) continue
         const elapsed = now - client.lastClientActivityAt
         if (elapsed > RemoteAgentServer.HEARTBEAT_TIMEOUT_MS) {
-          console.log(`[Heartbeat] Client timeout (${Math.round(elapsed / 1000)}s) — closing connection`)
+          log.info(SCOPE.SERVER, `Client timeout (${Math.round(elapsed / 1000)}s) — closing connection`)
           ws.close(4002, 'Heartbeat timeout — client unresponsive')
           continue
         }
@@ -1291,26 +1351,29 @@ export class RemoteAgentServer {
     if (client?.sessionId) {
       const sid = client.sessionId
       if (this.sessionProcessingLocks.has(sid)) {
-        console.log(`[Disconnect] Client disconnected with active stream for ${sid}, aborting`)
+        log.info(SCOPE.SERVER, `Client disconnected with active stream for ${shortId(sid)}, aborting`)
         this.claudeManager.markAsInterrupted(sid)
         this.claudeManager.forceAbortStreamIterator(sid)
       }
       // Keep SDK session alive for reconnection (2h idle timeout in ClaudeManager)
-      console.log(`[Disconnect] Keeping SDK session ${sid} alive for future reconnection`)
+      log.info(SCOPE.SERVER, `Keeping SDK session ${shortId(sid)} alive for future reconnection`)
     }
     this.clients.delete(ws)
 
     // Reject all pending promises that were waiting on this WebSocket
     const disconnectError = new Error('WebSocket disconnected')
     for (const [callId, pending] of this.pendingMcpToolCalls) {
+      if (pending.ws !== ws) continue
       pending.reject(disconnectError)
       this.pendingMcpToolCalls.delete(callId)
     }
     for (const [toolId, pending] of this.pendingHyperSpaceTools) {
+      if (pending.ws !== ws) continue
       pending.reject(disconnectError)
       this.pendingHyperSpaceTools.delete(toolId)
     }
     for (const [questionId, pending] of this.pendingAskQuestions) {
+      if (pending.ws !== ws) continue
       pending.reject(disconnectError)
       this.pendingAskQuestions.delete(questionId)
     }
@@ -1334,8 +1397,24 @@ export class RemoteAgentServer {
     if (this.httpServer) {
       this.httpServer.close()
     }
-    console.log('Server closed')
+    log.info(SCOPE.SERVER, 'Server closed')
   }
+
+  /**
+   * Forward a log entry from the OpenAI Compat Router to all connected clients.
+   * info-level logs are throttled (100ms interval) to prevent bandwidth flood.
+   * error/warn logs are never throttled.
+   */
+  forwardLogToClients(entry: { level: string; message: string; source: string }): void {
+    if (entry.level !== 'error' && entry.level !== 'warn') {
+      const now = Date.now()
+      if (now - this._lastLogForwardAt < 100) return
+      this._lastLogForwardAt = now
+    }
+    this.broadcastToAllClients({ type: 'log', data: entry })
+  }
+
+  private _lastLogForwardAt = 0
 
   /**
    * Broadcast a message to all connected, authenticated clients.

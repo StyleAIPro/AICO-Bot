@@ -83,12 +83,13 @@ export interface SlashCommandMatch {
  * Menu item for SlashCommandMenu rendering
  */
 export interface SlashCommandMenuItem {
-  type: 'command' | 'subcommand';
+  type: 'command' | 'subcommand' | 'skill';
   label: string;
   description: string;
   icon?: string;
-  command: SlashCommand;
+  command?: SlashCommand;
   subcommand?: SlashCommandSubcommand;
+  skill?: import('../../../shared/skill/skill-types').InstalledSkill;
   /** Text to insert/replace when selected */
   insertText: string;
 }

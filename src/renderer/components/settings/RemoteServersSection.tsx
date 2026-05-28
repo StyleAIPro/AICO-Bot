@@ -444,10 +444,11 @@ export function RemoteServersSection() {
       if (result.success && result.data) {
         setServers(result.data);
 
-        // Auto-connect disconnected servers (except those manually disconnected by user)
+        // Auto-connect disconnected servers (except those manually disconnected by user,
+        // and those with auth/connection errors that would just fail again)
         setManuallyDisconnected((prev) => {
           const serversToAutoConnect = result.data.filter(
-            (s: any) => s.status !== 'connected' && !prev.has(s.id),
+            (s: any) => s.status === 'disconnected' && !prev.has(s.id),
           );
 
           if (serversToAutoConnect.length > 0) {
@@ -568,6 +569,21 @@ export function RemoteServersSection() {
       if (result.success && result.data) {
         // Reload servers to get full server data (including detection results)
         await loadServers();
+
+        // If add was partial (SSH connection failed), show error and stop — do NOT retry
+        if (result.data.partial) {
+          const isAuthError = result.data.authError === true;
+          addTerminalEntry(
+            result.data.id,
+            'error',
+            isAuthError
+              ? t('Authentication failed: {{error}}. Please check your password and retry.', {
+                  error: result.data.error || '',
+                })
+              : t('Connection failed: {{error}}', { error: result.data.error || '' }),
+          );
+          return;
+        }
 
         // Auto-connect the newly added server
         console.log('[RemoteServersSection] Auto-connecting newly added server:', result.data.id);
@@ -931,7 +947,7 @@ export function RemoteServersSection() {
     const server = servers.find((s) => s.id === serverId);
     const archDisplay = server?.detectedArch ?? 'auto';
 
-    addTerminalEntry(serverId, 'command', `=== Offline deploying (arch: ${archDisplay}) ===`);
+    addTerminalEntry(serverId, 'command', t('=== Offline deploying (arch: {{arch}}) ===', { arch: archDisplay }));
 
     try {
       const result = await api.remoteServerDeployOffline(serverId);
@@ -941,14 +957,14 @@ export function RemoteServersSection() {
       } catch {}
 
       if (result.success) {
-        addTerminalEntry(serverId, 'success', 'Offline deploy completed!');
+        addTerminalEntry(serverId, 'success', t('Offline deploy completed!'));
         if (!options?.skipAlert) {
           await alertDialog(t('Agent deployed offline successfully'));
         }
         await loadServers();
         return true;
       } else {
-        addTerminalEntry(serverId, 'error', `Offline deploy failed: ${result.error}`);
+        addTerminalEntry(serverId, 'error', t('Offline deploy failed: {{error}}', { error: result.error }));
         if (!options?.skipAlert) {
           await alertDialog(result.error || t('Failed to deploy agent offline'));
         }
@@ -1016,7 +1032,7 @@ export function RemoteServersSection() {
       t('Batch deploy completed: {{succeeded}}/{{total}} succeeded{{failed}}', {
         succeeded,
         total,
-        failed: failed > 0 ? `, ${failed} failed` : '',
+        failed: failed > 0 ? t(', {{count}} failed', { count: failed }) : '',
       }),
     );
     await loadServers();

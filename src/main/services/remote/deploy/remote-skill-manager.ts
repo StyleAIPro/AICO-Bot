@@ -550,7 +550,7 @@ async function installRemoteSkillDirect(
       await fs.promises.writeFile(filePath, file.content, 'utf-8');
     }
 
-    // Step 5: Upload to remote via SSH (base64 encoding)
+    // Step 5: Upload to remote via SFTP (binary-safe, no command length limit)
     onOutput?.({
       type: 'stdout',
       content: `[${server.name}] [Direct Upload] 上传文件到远程服务器...\n`,
@@ -565,19 +565,14 @@ async function installRemoteSkillDirect(
       .replace(/[^a-z0-9-]/g, '-');
 
     const remoteSkillDir = `${remoteHome}/.agents/skills/${dirName}`;
+    await manager.executeCommand(`rm -rf "${remoteSkillDir}"`);
     await manager.executeCommand(`mkdir -p "${remoteSkillDir}"`);
 
     for (const file of files) {
       const remoteFilePath = `${remoteSkillDir}/${file.path}`;
       const remoteDir = path.dirname(remoteFilePath);
       await manager.executeCommand(`mkdir -p "${remoteDir}"`);
-      const base64Content = Buffer.from(file.content).toString('base64');
-      await executeWithTimeout(
-        service,
-        manager,
-        `echo "${base64Content}" | base64 -d > "${remoteFilePath}"`,
-        30000,
-      );
+      await manager.writeFile(remoteFilePath, Buffer.from(file.content));
       onOutput?.({ type: 'stdout', content: `  ✓ ${file.path}\n` });
     }
 
@@ -625,13 +620,7 @@ async function installRemoteSkillDirect(
       }
     }
 
-    const metaBase64 = Buffer.from(metaJson).toString('base64');
-    await executeWithTimeout(
-      service,
-      manager,
-      `echo "${metaBase64}" | base64 -d > "${remoteSkillDir}/META.json"`,
-      30000,
-    );
+    await manager.writeFile(`${remoteSkillDir}/META.json`, Buffer.from(metaJson));
     onOutput?.({ type: 'stdout', content: `  ✓ META.json\n` });
 
     onOutput?.({
@@ -698,7 +687,8 @@ export async function syncLocalSkillToRemote(
     });
     const remoteHome = (await manager.executeCommand('echo $HOME')).trim();
     const remoteSkillDir = `${remoteHome}/.agents/skills/${skillId}`;
-    await manager.executeCommand(`mkdir -p ${remoteSkillDir}`);
+    await manager.executeCommand(`rm -rf "${remoteSkillDir}"`);
+    await manager.executeCommand(`mkdir -p "${remoteSkillDir}"`);
 
     // Upload each file via SFTP (binary-safe, no command length limit)
     for (const file of files) {

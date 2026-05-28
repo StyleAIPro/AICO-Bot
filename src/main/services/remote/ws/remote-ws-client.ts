@@ -44,9 +44,11 @@ export class RemoteWsClient extends EventEmitter {
   private readonly pongTimeoutMs = 90 * 1000;
   private authenticated = false;
   public readonly sessionId: string | null = null;
-  private isInterrupted = false;
+  private interruptedSessions = new Set<string>();
   private shouldReconnect = true;
   private _mcpToolsRegistered = false;
+  private sessionlessFsBusy = false;
+  private sessionlessFsQueue: Array<() => void> = [];
 
   get mcpToolsRegistered(): boolean {
     return this._mcpToolsRegistered;
@@ -57,8 +59,16 @@ export class RemoteWsClient extends EventEmitter {
 
   private activeStreamSessions = new Map<
     string,
-    { resolve: (value: string) => void; reject: (reason: Error) => void }
+    {
+      resolve: (value: { content: string; tokenUsage?: any }) => void;
+      reject: (reason: Error) => void;
+      cleanup: () => void;
+    }
   >();
+  private pendingIdleTimeouts = new Map<string, {
+    continueWaiting: () => void;
+    forceDisconnect: () => void;
+  }>();
 
   constructor(config: RemoteWsClientConfig, sessionId?: string) {
     super();
@@ -82,6 +92,7 @@ export class RemoteWsClient extends EventEmitter {
     this.shouldReconnect = true;
     this.authenticated = false;
     this._mcpToolsRegistered = false;
+    this.interruptedSessions.clear();
 
     return new Promise<void>((resolve, reject) => {
       const host = this.config.useSshTunnel ? 'localhost' : this.config.host;
@@ -202,7 +213,8 @@ export class RemoteWsClient extends EventEmitter {
             `[${this.config.serverId}] WebSocket closed with ${this.activeStreamSessions.size} ` +
               `active stream(s). Rejecting all pending promises.`,
           );
-          for (const [sessionId, pending] of this.activeStreamSessions) {
+          for (const [sessionId, pending] of Array.from(this.activeStreamSessions.entries())) {
+            pending.cleanup();
             pending.reject(
               new Error(
                 `WebSocket disconnected (code: ${event.code ?? 1006}) while stream ${sessionId} was active. ` +
@@ -210,7 +222,6 @@ export class RemoteWsClient extends EventEmitter {
               ),
             );
           }
-          this.activeStreamSessions.clear();
         }
 
         this.emit('disconnected', { code: event.code, reason });
@@ -265,10 +276,11 @@ export class RemoteWsClient extends EventEmitter {
     try {
       const message: ServerMessage = JSON.parse(data.toString());
 
-      if (this.isInterrupted) {
+      if (message.sessionId && this.interruptedSessions.has(message.sessionId)) {
         const blockedTypes = [
           'claude:stream',
           'claude:usage',
+          'claude:context-usage',
           'thought',
           'thought:delta',
           'tool:call',
@@ -281,7 +293,7 @@ export class RemoteWsClient extends EventEmitter {
           'text:block-start',
         ];
         if (blockedTypes.includes(message.type as string)) {
-          log.debug(`[${this.config.serverId}] Blocking event after interrupt: ${message.type}`);
+          log.debug(`[${this.config.serverId}] Blocking event for interrupted session ${message.sessionId}: ${message.type}`);
           return;
         }
       }
@@ -301,20 +313,29 @@ export class RemoteWsClient extends EventEmitter {
           break;
 
         case 'claude:stream':
-          this.emit('claude:stream', { sessionId: message.sessionId, data: message.data });
+          this.emit('claude:stream', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'claude:usage':
-          this.emit('claude:usage', { sessionId: message.sessionId, data: message.data });
+          this.emit('claude:usage', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
+          break;
+
+        case 'claude:context-usage':
+          this.emit('claude:context-usage', { sessionId: message.sessionId, data: message.data });
           break;
 
         case 'claude:complete':
-          this.emit('claude:complete', { sessionId: message.sessionId, data: message.data });
+          this.emit('claude:complete', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'claude:error':
           log.error(`[${this.config.serverId}] Claude error:`, message.data);
-          this.emit('claude:error', { sessionId: message.sessionId, data: message.data });
+          this.emit('claude:error', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
+          break;
+
+        case 'claude:api-warning':
+          log.warn(`[${this.config.serverId}] API warning:`, message.data);
+          this.emit('claude:api-warning', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'claude:session':
@@ -322,44 +343,48 @@ export class RemoteWsClient extends EventEmitter {
             `[${this.config.serverId}] Received SDK session_id:`,
             message.data?.sdkSessionId,
           );
-          this.emit('claude:session', { sessionId: message.sessionId, data: message.data });
+          this.emit('claude:session', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'tool:call':
-          this.emit('tool:call', { sessionId: message.sessionId, data: message.data });
+          this.emit('tool:call', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'tool:delta':
-          this.emit('tool:delta', { sessionId: message.sessionId, data: message.data });
+          this.emit('tool:delta', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'tool:result':
-          this.emit('tool:result', { sessionId: message.sessionId, data: message.data });
+          this.emit('tool:result', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'tool:error':
           log.error(`[${this.config.serverId}] Tool error:`, message.data);
-          this.emit('tool:error', { sessionId: message.sessionId, data: message.data });
+          this.emit('tool:error', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'terminal:output':
-          this.emit('terminal:output', { sessionId: message.sessionId, data: message.data });
+          this.emit('terminal:output', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'thought':
-          this.emit('thought', { sessionId: message.sessionId, data: message.data });
+          this.emit('thought', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'thought:delta':
-          this.emit('thought:delta', { sessionId: message.sessionId, data: message.data });
+          this.emit('thought:delta', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
+          break;
+
+        case 'stream:alive':
+          this.emit('stream:alive', { sessionId: message.sessionId, data: message.data });
           break;
 
         case 'mcp:status':
-          this.emit('mcp:status', { sessionId: message.sessionId, data: message.data });
+          this.emit('mcp:status', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'mcp:tool:call':
-          this.emit('mcp:tool:call', { sessionId: message.sessionId, data: message.data });
+          this.emit('mcp:tool:call', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'mcp:tool:response':
@@ -367,20 +392,20 @@ export class RemoteWsClient extends EventEmitter {
           break;
 
         case 'compact:boundary':
-          this.emit('compact:boundary', { sessionId: message.sessionId, data: message.data });
+          this.emit('compact:boundary', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'text:block-start':
-          this.emit('text:block-start', { sessionId: message.sessionId, data: message.data });
+          this.emit('text:block-start', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'fs:result':
-          this.emit('fs:result', { sessionId: message.sessionId, data: message.data });
+          this.emit('fs:result', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'fs:error':
           log.error(`[${this.config.serverId}] FS error:`, message.data);
-          this.emit('fs:error', { sessionId: message.sessionId, data: message.data });
+          this.emit('fs:error', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'pong':
@@ -413,19 +438,23 @@ export class RemoteWsClient extends EventEmitter {
           break;
 
         case 'worker:started':
-          this.emit('worker:started', { sessionId: message.sessionId, data: message.data });
+          this.emit('worker:started', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'worker:completed':
-          this.emit('worker:completed', { sessionId: message.sessionId, data: message.data });
+          this.emit('worker:completed', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'ask:question':
-          this.emit('ask:question', { sessionId: message.sessionId, data: message.data });
+          this.emit('ask:question', { sessionId: message.sessionId, generationId: message.generationId, data: message.data });
           break;
 
         case 'permission:request':
           this.emit('permission:request', { sessionId: message.sessionId, data: message.data });
+          break;
+
+        case 'log':
+          this.emit('log', { data: message.data });
           break;
 
         default:
@@ -473,14 +502,53 @@ export class RemoteWsClient extends EventEmitter {
       let fullContent = '';
       let tokenUsage: any = null;
       let isComplete = false;
+      const genId = options.generationId;
 
-      const IDLE_TIMEOUT_MS = options.timeoutMs || 30 * 60 * 1000;
+      const IDLE_TIMEOUT_MS = options.timeoutMs || 60 * 60 * 1000;
       const CHECK_INTERVAL_MS = 60 * 1000;
 
       let timeoutTimer: NodeJS.Timeout | null = null;
       let lastActivityTime = Date.now();
 
+      // Initial response timeout - prevent hanging if proxy crashes silently
+      const INITIAL_TIMEOUT_MS = 30 * 1000;
+      let initialTimeoutSettled = false;
+
+      const initialTimeout = setTimeout(() => {
+        if (initialTimeoutSettled) return;
+        initialTimeoutSettled = true;
+
+        cleanup();
+        reject(new Error(
+          `Remote proxy not responding after ${INITIAL_TIMEOUT_MS / 1000}s. ` +
+          `The agent may have crashed or the connection is blocked.`
+        ));
+      }, INITIAL_TIMEOUT_MS);
+
+      const cleanup = () => {
+        if (timeoutTimer) {
+          clearTimeout(timeoutTimer);
+          timeoutTimer = null;
+        }
+        clearTimeout(initialTimeout);
+
+        this.off('claude:stream', streamHandler);
+        this.off('claude:usage', usageHandler);
+        this.off('claude:complete', completeHandler);
+        this.off('claude:error', errorHandler);
+        this.off('thought', activityHandler);
+        this.off('thought:delta', activityHandler);
+        this.off('terminal:output', activityHandler);
+        this.activeStreamSessions.delete(sessionId);
+      };
+
       const resetTimeout = () => {
+        // Clear initial timeout on first activity
+        if (!initialTimeoutSettled) {
+          clearTimeout(initialTimeout);
+          initialTimeoutSettled = true;
+        }
+
         lastActivityTime = Date.now();
         if (timeoutTimer) {
           clearTimeout(timeoutTimer);
@@ -492,19 +560,39 @@ export class RemoteWsClient extends EventEmitter {
               clearTimeout(timeoutTimer);
               timeoutTimer = null;
             }
-            this.off('claude:stream', streamHandler);
-            this.off('claude:usage', usageHandler);
-            this.off('claude:complete', completeHandler);
-            this.off('claude:error', errorHandler);
-            this.off('thought', activityHandler);
-            this.off('thought:delta', activityHandler);
-            this.off('terminal:output', activityHandler);
-            this.activeStreamSessions.delete(sessionId);
-            reject(
-              new Error(
-                `Chat timeout - no activity for ${Math.round(IDLE_TIMEOUT_MS / 60000)} minutes`,
-              ),
-            );
+            // Emit idle:timeout event instead of immediately rejecting
+            // Let the user decide whether to continue waiting or force disconnect
+            const doForceDisconnect = () => {
+              this.off('claude:stream', streamHandler);
+              this.off('claude:usage', usageHandler);
+              this.off('claude:complete', completeHandler);
+              this.off('claude:error', errorHandler);
+              this.off('thought', activityHandler);
+              this.off('thought:delta', activityHandler);
+              this.off('terminal:output', activityHandler);
+              this.off('tool:call', activityHandler);
+              this.off('tool:result', activityHandler);
+              this.off('stream:alive', activityHandler);
+              this.activeStreamSessions.delete(sessionId);
+              this.pendingIdleTimeouts.delete(sessionId);
+              reject(
+                new Error(
+                  `Chat timeout - no activity for ${Math.round(IDLE_TIMEOUT_MS / 60000)} minutes (user forced)`,
+                ),
+              );
+            };
+            const doContinueWaiting = () => {
+              resetTimeout();
+              this.pendingIdleTimeouts.delete(sessionId);
+            };
+            this.pendingIdleTimeouts.set(sessionId, {
+              continueWaiting: doContinueWaiting,
+              forceDisconnect: doForceDisconnect,
+            });
+            this.emit('idle:timeout', {
+              sessionId,
+              idleMinutes: Math.round(IDLE_TIMEOUT_MS / 60000),
+            });
           } else if (!isComplete) {
             timeoutTimer = setTimeout(checkTimeout, CHECK_INTERVAL_MS);
           }
@@ -512,18 +600,27 @@ export class RemoteWsClient extends EventEmitter {
         timeoutTimer = setTimeout(checkTimeout, CHECK_INTERVAL_MS);
       };
 
+      const matchesGeneration = (data: any) => {
+        if (data.sessionId !== sessionId) return false;
+        // Old server doesn't echo generationId — accept for backward compat
+        if (data.generationId === undefined) return true;
+        // Client didn't request generationId — accept all
+        if (!genId) return true;
+        return data.generationId === genId;
+      };
+
       const streamHandler = (data: any) => {
-        if (data.sessionId === sessionId) {
+        if (matchesGeneration(data)) {
           resetTimeout();
           const text = data.data?.text || data.data?.content || '';
           chunks.push(text);
           fullContent = chunks.join('');
-          this.emit('stream', { sessionId, content: fullContent, delta: text });
+          this.emit('stream', { sessionId, generationId: genId, content: fullContent, delta: text });
         }
       };
 
       const usageHandler = (data: any) => {
-        if (data.sessionId === sessionId) {
+        if (matchesGeneration(data)) {
           resetTimeout();
           tokenUsage = data.data;
           log.debug(`[${this.config.serverId}] Received token usage:`, tokenUsage);
@@ -531,7 +628,7 @@ export class RemoteWsClient extends EventEmitter {
       };
 
       const completeHandler = (data: any) => {
-        if (data.sessionId === sessionId) {
+        if (matchesGeneration(data)) {
           isComplete = true;
           if (timeoutTimer) {
             clearTimeout(timeoutTimer);
@@ -544,14 +641,17 @@ export class RemoteWsClient extends EventEmitter {
           this.off('thought', activityHandler);
           this.off('thought:delta', activityHandler);
           this.off('terminal:output', activityHandler);
+          this.off('tool:call', activityHandler);
+          this.off('tool:result', activityHandler);
+          this.off('stream:alive', activityHandler);
           this.activeStreamSessions.delete(sessionId);
-          const finalContent = fullContent || data.data?.content || '';
-          resolve({ content: finalContent, tokenUsage });
+          this.pendingIdleTimeouts.delete(sessionId);
+          resolve({ content: fullContent, tokenUsage });
         }
       };
 
       const errorHandler = (data: any) => {
-        if (data.sessionId === sessionId) {
+        if (matchesGeneration(data)) {
           isComplete = true;
           if (timeoutTimer) {
             clearTimeout(timeoutTimer);
@@ -564,14 +664,21 @@ export class RemoteWsClient extends EventEmitter {
           this.off('thought', activityHandler);
           this.off('thought:delta', activityHandler);
           this.off('terminal:output', activityHandler);
+          this.off('tool:call', activityHandler);
+          this.off('tool:result', activityHandler);
+          this.off('stream:alive', activityHandler);
           this.activeStreamSessions.delete(sessionId);
+          this.pendingIdleTimeouts.delete(sessionId);
           reject(new Error(data.data?.error || 'Chat failed'));
         }
       };
 
       const activityHandler = (data: any) => {
-        if (data.sessionId === sessionId) {
+        if (matchesGeneration(data)) {
           resetTimeout();
+          if (data.type === 'stream:alive') {
+            this.emit('stream:alive', data);
+          }
         }
       };
 
@@ -582,26 +689,45 @@ export class RemoteWsClient extends EventEmitter {
       this.on('thought', activityHandler);
       this.on('thought:delta', activityHandler);
       this.on('terminal:output', activityHandler);
+      this.on('tool:call', activityHandler);
+      this.on('tool:result', activityHandler);
+      this.on('stream:alive', activityHandler);
 
-      this.activeStreamSessions.set(sessionId, { resolve, reject });
+      this.activeStreamSessions.set(sessionId, { resolve, reject, cleanup });
+      this.interruptedSessions.delete(sessionId);
 
       const sent = this.send({
         type: 'claude:chat',
         sessionId,
         payload: {
+          generationId: genId,
           messages,
           options: { ...options, stream: true },
         },
       });
 
       if (!sent) {
-        this.activeStreamSessions.delete(sessionId);
+        cleanup();
         reject(new Error('Failed to send chat request'));
         return;
       }
 
       resetTimeout();
     });
+  }
+
+  continueIdleTimeout(sessionId: string): void {
+    const pending = this.pendingIdleTimeouts.get(sessionId);
+    if (pending) {
+      pending.continueWaiting();
+    }
+  }
+
+  forceIdleTimeoutDisconnect(sessionId: string): void {
+    const pending = this.pendingIdleTimeouts.get(sessionId);
+    if (pending) {
+      pending.forceDisconnect();
+    }
   }
 
   listFs(path?: string): boolean {
@@ -636,7 +762,9 @@ export class RemoteWsClient extends EventEmitter {
    * Does NOT require an SDK session — uses session-less fs:stat.
    */
   statPath(path: string): Promise<{ exists: boolean; isDirectory: boolean; error?: string }> {
-    return new Promise((resolve, reject) => {
+    return this.enqueueSessionlessFsRequest(
+      () =>
+        new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.off('fs:result', handler);
         reject(new Error('fs:stat request timed out (10s)'));
@@ -655,7 +783,8 @@ export class RemoteWsClient extends EventEmitter {
         this.off('fs:result', handler);
         reject(new Error('Failed to send fs:stat request'));
       }
-    });
+        }),
+    );
   }
 
   /**
@@ -663,7 +792,9 @@ export class RemoteWsClient extends EventEmitter {
    * Does NOT require an SDK session — uses session-less fs:mkdir.
    */
   mkdir(path: string): Promise<{ success: boolean; error?: string }> {
-    return new Promise((resolve, reject) => {
+    return this.enqueueSessionlessFsRequest(
+      () =>
+        new Promise((resolve, reject) => {
       const timeout = setTimeout(() => {
         this.off('fs:result', handler);
         reject(new Error('fs:mkdir request timed out (10s)'));
@@ -681,6 +812,45 @@ export class RemoteWsClient extends EventEmitter {
         clearTimeout(timeout);
         this.off('fs:result', handler);
         reject(new Error('Failed to send fs:mkdir request'));
+      }
+        }),
+    );
+  }
+
+  private enqueueSessionlessFsRequest<T>(operation: () => Promise<T>): Promise<T> {
+    return new Promise<T>((resolve, reject) => {
+      const GLOBAL_TIMEOUT_MS = 15 * 1000; // 15 秒全局超时
+      let globalTimeout: NodeJS.Timeout | null = null;
+
+      const run = () => {
+        this.sessionlessFsBusy = true;
+        if (globalTimeout) clearTimeout(globalTimeout);
+        operation()
+          .then(resolve, reject)
+          .finally(() => {
+            const next = this.sessionlessFsQueue.shift();
+            if (next) {
+              next();
+            } else {
+              this.sessionlessFsBusy = false;
+            }
+          });
+      };
+
+      // 设置全局超时
+      globalTimeout = setTimeout(() => {
+        if (!this.sessionlessFsBusy) {
+          // 如果还没开始执行，直接 reject
+          reject(new Error('Sessionless FS request queue timed out (15s)'));
+          return;
+        }
+        // 如果正在执行，已过超时时间，无需额外操作（单个请求已有 10s 超时）
+      }, GLOBAL_TIMEOUT_MS);
+
+      if (this.sessionlessFsBusy) {
+        this.sessionlessFsQueue.push(run);
+      } else {
+        run();
       }
     });
   }
@@ -891,33 +1061,44 @@ export class RemoteWsClient extends EventEmitter {
       log.debug(
         `[${this.config.serverId}] Not connected, attempting quick reconnect to send interrupt...`,
       );
+      const previousShouldReconnect = this.shouldReconnect;
       this.shouldReconnect = true;
-      this.connect();
-      await new Promise((resolve) => setTimeout(resolve, 500));
-      if (await sendMessages()) {
+
+      let reconnected = false;
+      try {
+        const connected = await Promise.race<boolean>([
+          this.connect().then(() => true).catch(() => false),
+          new Promise<boolean>((resolve) => setTimeout(() => resolve(false), 5000)),
+        ]);
+        reconnected = connected && this.isConnected();
+        if (!reconnected && this.isReconnecting()) {
+          reconnected = await this.waitForReconnect(5000);
+        }
+      } finally {
+        this.shouldReconnect = previousShouldReconnect;
+      }
+
+      if (reconnected && (await sendMessages())) {
         log.debug(`[${this.config.serverId}] Messages sent after reconnect`);
       } else {
         log.warn(
           `[${this.config.serverId}] Reconnect failed, could not send interrupt to remote server`,
         );
       }
-      this.shouldReconnect = false;
     }
 
     log.debug(`[${this.config.serverId}] Waiting 300ms for queued events to process...`);
     await new Promise((resolve) => setTimeout(resolve, 300));
 
-    this.isInterrupted = true;
-    log.debug(`[${this.config.serverId}] isInterrupted flag set`);
+    this.interruptedSessions.add(sessionId);
+    log.debug(`[${this.config.serverId}] Session ${sessionId} marked as interrupted`);
 
-    for (const [activeSessionId, { reject }] of this.activeStreamSessions) {
-      log.debug(`[${this.config.serverId}] Rejecting active stream session: ${activeSessionId}`);
-      reject(new Error('Interrupted by user'));
+    const target = this.activeStreamSessions.get(sessionId);
+    if (target) {
+      log.debug(`[${this.config.serverId}] Rejecting active stream for session: ${sessionId}`);
+      target.cleanup();
+      target.reject(new Error('Interrupted by user'));
     }
-    this.activeStreamSessions.clear();
-
-    log.debug(`[${this.config.serverId}] Disconnecting after interrupt...`);
-    this.disconnect();
 
     return true;
   }
@@ -933,15 +1114,35 @@ export class RemoteWsClient extends EventEmitter {
 // ============================================
 
 const activeClients = new Map<string, RemoteWsClient>();
+const clientSessionIds = new Map<RemoteWsClient, Set<string>>();
+const clientCloseHandlers = new Map<RemoteWsClient, () => void>();
 
 export function registerActiveClient(sessionId: string, client: RemoteWsClient): void {
   activeClients.set(sessionId, client);
-  log.info(`Registered active client for session: ${sessionId}`);
+  let sessionIds = clientSessionIds.get(client);
+  if (!sessionIds) {
+    sessionIds = new Set();
+    clientSessionIds.set(client, sessionIds);
+  }
+  sessionIds.add(sessionId);
 
-  client.once('close', () => {
-    activeClients.delete(sessionId);
-    log.info(`Unregistered client for session: ${sessionId}`);
-  });
+  if (!clientCloseHandlers.has(client)) {
+    const closeHandler = () => {
+      const ids = clientSessionIds.get(client);
+      if (ids) {
+        for (const id of ids) {
+          activeClients.delete(id);
+          log.info(`Unregistered client for session: ${id}`);
+        }
+      }
+      clientSessionIds.delete(client);
+      clientCloseHandlers.delete(client);
+    };
+    clientCloseHandlers.set(client, closeHandler);
+    client.once('close', closeHandler);
+  }
+
+  log.info(`Registered active client for session: ${sessionId}`);
 }
 
 export function getRemoteWsClient(sessionId: string): RemoteWsClient | undefined {
@@ -949,14 +1150,36 @@ export function getRemoteWsClient(sessionId: string): RemoteWsClient | undefined
 }
 
 export function unregisterActiveClient(sessionId: string): void {
+  const client = activeClients.get(sessionId);
   activeClients.delete(sessionId);
+  if (client) {
+    const sessionIds = clientSessionIds.get(client);
+    if (sessionIds) {
+      sessionIds.delete(sessionId);
+      if (sessionIds.size === 0) {
+        clientSessionIds.delete(client);
+        const closeHandler = clientCloseHandlers.get(client);
+        if (closeHandler) {
+          client.off('close', closeHandler);
+          clientCloseHandlers.delete(client);
+        }
+      }
+    }
+  }
   log.info(`Unregistered client for session: ${sessionId}`);
 }
 
 export function disconnectAllClients(): void {
-  for (const [sessionId, client] of Array.from(activeClients.entries())) {
+  const uniqueClients = new Set(activeClients.values());
+  activeClients.clear();
+  clientSessionIds.clear();
+  for (const [client, closeHandler] of Array.from(clientCloseHandlers.entries())) {
+    client.off('close', closeHandler);
+  }
+  clientCloseHandlers.clear();
+
+  for (const client of Array.from(uniqueClients)) {
     client.disconnect();
-    activeClients.delete(sessionId);
   }
   disconnectAllPooledConnections();
   log.info('All active clients and pooled connections disconnected');

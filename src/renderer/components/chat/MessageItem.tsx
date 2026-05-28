@@ -384,8 +384,28 @@ export const MessageItem = memo(function MessageItem({
       <div className="break-words leading-relaxed" data-message-content>
         {message.content &&
           (isUser ? (
-            // User messages: simple whitespace-preserving text
-            <span className="whitespace-pre-wrap">{message.content}</span>
+            message.metadata?.skillId ? (
+              // Skill invocation: show /skill-name tag + optional supplemental text
+              <div className="flex items-center gap-2 flex-wrap">
+                <Sparkles size={16} className="text-primary flex-shrink-0" />
+                <span className="font-mono text-primary font-medium">
+                  {message.metadata.skillTrigger || `/${message.metadata.skillName}`}
+                </span>
+                {message.metadata.skillDescription && (
+                  <span className="text-xs text-muted-foreground">
+                    {message.metadata.skillDescription}
+                  </span>
+                )}
+                {message.content.length > (message.metadata.skillTrigger?.length ?? 0) && (
+                  <span className="whitespace-pre-wrap">
+                    {message.content.substring(message.metadata.skillTrigger?.length ?? 0).trim()}
+                  </span>
+                )}
+              </div>
+            ) : (
+              // Normal user message
+              <span className="whitespace-pre-wrap">{message.content}</span>
+            )
           ) : // Assistant messages: full markdown rendering
           textBlocks ? (
             // Multiple text blocks: render with dividers between them

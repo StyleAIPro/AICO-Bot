@@ -267,4 +267,34 @@ export function registerAgentHandlers(): void {
       return { success: false, error: err.message };
     }
   });
+
+  // Continue waiting after idle timeout warning
+  wrapIpcHandle('agent:continue-idle-timeout', async (_event, conversationId: string) => {
+    try {
+      const client = getRemoteWsClient(conversationId);
+      if (client) {
+        client.continueIdleTimeout(conversationId);
+        return { success: true };
+      }
+      return { success: false, error: 'No active remote stream session' };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
+
+  // Force disconnect after idle timeout warning
+  wrapIpcHandle('agent:force-idle-timeout', async (_event, conversationId: string) => {
+    try {
+      const client = getRemoteWsClient(conversationId);
+      if (client) {
+        client.forceIdleTimeoutDisconnect(conversationId);
+        return { success: true };
+      }
+      return { success: false, error: 'No active remote stream session' };
+    } catch (error: unknown) {
+      const err = error as Error;
+      return { success: false, error: err.message };
+    }
+  });
 }

@@ -152,12 +152,16 @@ export class SSHManager {
 
       this.client.on('error', (err) => {
         this._ready = false;
+        this._forceDisconnected = false;
+        this._operationLock = Promise.resolve();
         console.error('[SSHManager] Connection error:', err);
         reject(err);
       });
 
       this.client.on('close', (reason) => {
         this._ready = false;
+        this._forceDisconnected = false;
+        this._operationLock = Promise.resolve();
         console.log('[SSHManager] Connection closed, reason:', reason);
         this.client = null;
         this.sftp = null;

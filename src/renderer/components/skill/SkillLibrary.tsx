@@ -30,13 +30,15 @@ import {
   Github,
   ExternalLink,
   Upload,
+  PackagePlus,
+  FolderInput,
 } from 'lucide-react';
 import type {
   InstalledSkill,
   SkillFileNode,
   SkillMarketSource,
 } from '../../../shared/skill/skill-types';
-import { api } from '../../api';
+import { api, isElectron } from '../../api';
 import { useConfirm } from '../ui/ConfirmDialog';
 
 // 文件节点接口
@@ -103,6 +105,13 @@ export function SkillLibrary() {
 
   // Remote uninstall loading state
   const [remoteUninstallLoading, setRemoteUninstallLoading] = useState(false);
+
+  // Import state
+  const [importing, setImporting] = useState(false);
+  const [importMenuOpen, setImportMenuOpen] = useState(false);
+
+  // Import ZIP file input ref (for Web mode)
+  const zipInputRef = useRef<HTMLInputElement>(null);
 
   // GitHub + GitCode 源列表
   const githubSources = marketSources.filter((s) => s.type === 'github' || s.type === 'gitcode');
@@ -232,6 +241,14 @@ export function SkillLibrary() {
     document.addEventListener('click', handleClickOutside);
     return () => document.removeEventListener('click', handleClickOutside);
   }, [showSourceDropdown]);
+
+  // 点击外部关闭导入菜单
+  useEffect(() => {
+    if (!importMenuOpen) return;
+    const handler = () => setImportMenuOpen(false);
+    document.addEventListener('click', handler);
+    return () => document.removeEventListener('click', handler);
+  }, [importMenuOpen]);
 
   // Push 弹窗打开时加载仓库目录
   useEffect(() => {
@@ -366,6 +383,140 @@ export function SkillLibrary() {
     }
   };
 
+  // 导入技能处理函数
+  const handleImportFromZip = useCallback(async () => {
+    setImportMenuOpen(false);
+    if (importing) return;
+
+    if (isElectron()) {
+      try {
+        console.log('[SkillImport] handleImportFromZip: opening dialog...');
+        const filePaths = await window.aicoBot.showOpenDialog({
+          title: t('Select ZIP file'),
+          filters: [{ name: 'ZIP', extensions: ['zip'] }],
+          properties: ['openFile'],
+        });
+
+        console.log('[SkillImport] dialog result:', filePaths);
+        if (!filePaths || filePaths.length === 0) return;
+
+        const filePath = filePaths[0];
+        console.log('[SkillImport] calling skillImportSkills with sourceType=zip, filePath=', filePath);
+        setImporting(true);
+        const result = await window.aicoBot.skillImportSkills({
+          sourceType: 'zip',
+          filePath,
+        });
+
+        console.log('[SkillImport] IPC result:', JSON.stringify(result));
+        if (result?.success && result.data) {
+          const { installed, skipped, errors } = result.data;
+          console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
+          if (installed.length > 0) {
+            console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
+          }
+          if (skipped.length > 0) {
+            console.warn(`Skipped ${skipped.length}: ${skipped.join(', ')}`);
+          }
+          if (errors.length > 0) {
+            console.error(`Errors: ${errors.join('; ')}`);
+          }
+          refreshSkills();
+        } else {
+          console.warn('[SkillImport] result not success or no data:', result);
+        }
+      } catch (err) {
+        console.error('[SkillImport] Import from ZIP failed:', err);
+      } finally {
+        setImporting(false);
+      }
+    } else {
+      zipInputRef.current?.click();
+    }
+  }, [importing, refreshSkills]);
+
+  const handleImportFromFolder = useCallback(async () => {
+    setImportMenuOpen(false);
+    if (importing) return;
+
+    try {
+      console.log('[SkillImport] handleImportFromFolder: opening dialog...');
+      const dirPaths = await window.aicoBot.showOpenDialog({
+        title: t('Select folder containing skills'),
+        properties: ['openDirectory'],
+      });
+
+      console.log('[SkillImport] dialog result:', dirPaths);
+      if (!dirPaths || dirPaths.length === 0) return;
+
+      const dirPath = dirPaths[0];
+      console.log('[SkillImport] calling skillImportSkills with sourceType=folder, filePath=', dirPath);
+      setImporting(true);
+      const result = await window.aicoBot.skillImportSkills({
+        sourceType: 'folder',
+        filePath: dirPath,
+      });
+
+      console.log('[SkillImport] IPC result:', JSON.stringify(result));
+      if (result?.success && result.data) {
+        const { installed, skipped, errors } = result.data;
+        console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
+        if (installed.length > 0) {
+          console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
+        }
+        if (skipped.length > 0) {
+          console.warn(`Skipped ${skipped.length}: ${skipped.join(', ')}`);
+        }
+        if (errors.length > 0) {
+          console.error(`Errors: ${errors.join('; ')}`);
+        }
+        refreshSkills();
+      } else {
+        console.warn('[SkillImport] result not success or no data:', result);
+      }
+    } catch (err) {
+      console.error('Import from folder failed:', err);
+    } finally {
+      setImporting(false);
+    }
+  }, [importing, refreshSkills]);
+
+  const handleZipFileChange = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setImporting(true);
+    try {
+      console.log('[SkillImport] handleZipFileChange: uploading file=', file.name, 'size=', file.size);
+      const result = await api.skillImportFromZip(file);
+
+      console.log('[SkillImport] HTTP result:', JSON.stringify(result));
+      if (result?.success && result.data) {
+        const { installed, skipped, errors } = result.data;
+        console.log('[SkillImport] installed:', installed, 'skipped:', skipped, 'errors:', errors);
+        if (installed.length > 0) {
+          console.log(`Installed ${installed.length} skills: ${installed.join(', ')}`);
+        }
+        if (skipped.length > 0) {
+          console.warn(`Skipped ${skipped.length}: ${skipped.join(', ')}`);
+        }
+        if (errors.length > 0) {
+          console.error(`Errors: ${errors.join('; ')}`);
+        }
+        refreshSkills();
+      } else {
+        console.warn('[SkillImport] result not success or no data:', result);
+      }
+    } catch (err) {
+      console.error('Import from ZIP failed:', err);
+    } finally {
+      setImporting(false);
+      if (zipInputRef.current) {
+        zipInputRef.current.value = '';
+      }
+    }
+  }, [refreshSkills]);
+
   // 刷新当前来源的技能列表
   const handleRefresh = () => {
     if (selectedSource.type === 'local') {
@@ -479,6 +630,40 @@ export function SkillLibrary() {
               </div>
 
               <div className="flex items-center gap-2">
+                <div className="relative">
+                  <button
+                    onClick={(e) => { e.stopPropagation(); setImportMenuOpen(!importMenuOpen); }}
+                    disabled={importing}
+                    className="flex items-center gap-1 text-xs text-primary hover:text-primary/80 disabled:opacity-50"
+                  >
+                    {importing ? (
+                      <Loader2 className="w-3 h-3 animate-spin" />
+                    ) : (
+                      <PackagePlus className="w-3 h-3" />
+                    )}
+                    {t('Import')}
+                  </button>
+                  {importMenuOpen && (
+                    <div className="absolute left-0 top-full mt-1 bg-popover border border-border rounded-lg shadow-lg py-1 z-50 min-w-[160px]">
+                      <button
+                        onClick={handleImportFromZip}
+                        className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-popover-foreground hover:bg-accent text-left"
+                      >
+                        <PackagePlus className="w-3 h-3" />
+                        {t('From ZIP File')}
+                      </button>
+                      {isElectron() && (
+                        <button
+                          onClick={handleImportFromFolder}
+                          className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-popover-foreground hover:bg-accent text-left"
+                        >
+                          <FolderInput className="w-3 h-3" />
+                          {t('From Folder')}
+                        </button>
+                      )}
+                    </div>
+                  )}
+                </div>
                 <button
                   onClick={handleRefresh}
                   className="flex items-center gap-1 text-xs text-primary hover:text-primary/80"
@@ -766,6 +951,15 @@ export function SkillLibrary() {
           )}
         </div>
       </div>
+
+      {/* Hidden file input for Web mode ZIP import */}
+      <input
+        ref={zipInputRef}
+        type="file"
+        accept=".zip"
+        className="hidden"
+        onChange={handleZipFileChange}
+      />
 
       {/* Push to GitHub Modal */}
       {showPushModal && selectedSkillId && (

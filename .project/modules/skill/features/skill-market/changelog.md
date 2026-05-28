@@ -2,6 +2,7 @@
 
 | 日期 | 内容 | 指令人 | 触发来源 |
 |------|------|--------|---------|
+| 2026-05-13 | 技能安装改为全量更新：`installSkillFromSource()` 和 `installRemoteSkillDirect()` 创建目录前先删除旧目录，避免旧版孤立文件残留 | @mi-saka | feature-skill-full-update-v1 |
 | 2026-04-16 | 初始设计 | @moonseeker1 | 新功能 |
 | 2026-04-18 | 修复 GitCode 技能获取全面失败（rate limiter、超时、错误传播、代理缓存） | @MoonSeeker | BUG-001 |
 | 2026-04-18 | 添加 asyncPool 并发控制，Promise.all 改为批次加载（并发上限 3） | @MoonSeeker | BUG-001 |
