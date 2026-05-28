@@ -19,7 +19,7 @@ import {
 import { Header } from '../components/layout/Header';
 import { SpaceGuide } from '../components/space/SpaceGuide';
 import { HyperSpaceCreationDialog } from '../components/space/HyperSpaceCreationDialog';
-import { Monitor, Blocks, ArrowRight, Cloud, Folder, Bot } from 'lucide-react';
+import { Monitor, Blocks, ArrowRight, Cloud, Folder, Bot, Library } from 'lucide-react';
 import { api } from '../api';
 import { useTranslation } from '../i18n';
 import { useConfirm } from '../components/ui/ConfirmDialog';
@@ -435,6 +435,23 @@ export function HomePage() {
               <div className="flex justify-end">
                 <span className="text-xs text-muted-foreground flex items-center gap-1">
                   {t('Open')} <ArrowRight className="w-3 h-3" />
+                </span>
+              </div>
+            </div>
+
+            {/* Knowledge Base card */}
+            <div
+              onClick={() => setView('knowledgeBase')}
+              className="kb-space-card p-5 rounded-xl cursor-pointer flex flex-col gap-3 min-h-[120px]"
+            >
+              <div className="flex items-center gap-2">
+                <Library className="w-5 h-5 text-emerald-500" />
+                <h2 className="text-sm font-semibold">知识库</h2>
+              </div>
+              <p className="text-xs text-muted-foreground flex-1">个人 Wiki 知识管理</p>
+              <div className="flex justify-end">
+                <span className="text-xs text-muted-foreground flex items-center gap-1">
+                  {t('Enter')} <ArrowRight className="w-3 h-3" />
                 </span>
               </div>
             </div>

@@ -1,48 +1,88 @@
 /**
  * Streamdown plugin configuration (lazy-loaded)
  *
- * Loads @streamdown/code (Shiki) asynchronously to avoid blocking
- * the module graph in Vite dev mode. The plugin initializes on first
- * use and caches the result for subsequent renders.
+ * Loads @streamdown/code (Shiki) and @streamdown/math (KaTeX) asynchronously
+ * to avoid blocking the module graph in Vite dev mode.
  */
 
 import { useState, useEffect } from 'react';
-import type { CodeHighlighterPlugin } from 'streamdown';
+import type { CodeHighlighterPlugin, MathPlugin } from 'streamdown';
 
-let cachedPlugin: CodeHighlighterPlugin | null = null;
-let loadPromise: Promise<CodeHighlighterPlugin> | null = null;
+// --- Code highlighter (Shiki) ---
+
+let cachedCodePlugin: CodeHighlighterPlugin | null = null;
+let loadCodePromise: Promise<CodeHighlighterPlugin> | null = null;
 
 function loadCodePlugin(): Promise<CodeHighlighterPlugin> {
-  if (!loadPromise) {
-    loadPromise = import('@streamdown/code').then((m) => {
-      // Dark theme first: inline `color` uses the first theme's values,
-      // which must be readable on dark backgrounds (our default).
-      // The second theme goes into --shiki-dark CSS var for light mode.
+  if (!loadCodePromise) {
+    loadCodePromise = import('@streamdown/code').then((m) => {
       const plugin = m.createCodePlugin({
         themes: ['github-dark', 'github-light'],
       });
-      cachedPlugin = plugin;
+      cachedCodePlugin = plugin;
       return plugin;
     });
   }
-  return loadPromise;
+  return loadCodePromise;
 }
 
-/**
- * Hook that returns the Shiki code highlighter plugin.
- * Returns undefined until the plugin is loaded, then the cached instance.
- */
 export function useCodePlugin(): CodeHighlighterPlugin | undefined {
   const [plugin, setPlugin] = useState<CodeHighlighterPlugin | undefined>(
-    cachedPlugin ?? undefined,
+    cachedCodePlugin ?? undefined,
   );
 
   useEffect(() => {
-    if (cachedPlugin) {
-      setPlugin(cachedPlugin);
+    if (cachedCodePlugin) {
+      setPlugin(cachedCodePlugin);
       return;
     }
     loadCodePlugin().then(setPlugin);
+  }, []);
+
+  return plugin;
+}
+
+// --- Math (KaTeX) ---
+
+let cachedMathPlugin: MathPlugin | null = null;
+let loadMathPromise: Promise<MathPlugin> | null = null;
+let mathStylesInjected = false;
+
+function loadMathPlugin(): Promise<MathPlugin> {
+  if (!loadMathPromise) {
+    loadMathPromise = import('@streamdown/math').then((m) => {
+      const plugin = m.createMathPlugin({ singleDollarTextMath: true });
+      cachedMathPlugin = plugin;
+
+      // Inject KaTeX CSS
+      if (!mathStylesInjected) {
+        import('katex/dist/katex.min.css').catch(() => {});
+        const styles = plugin.getStyles?.();
+        if (styles) {
+          const link = document.createElement('style');
+          link.textContent = styles;
+          document.head.appendChild(link);
+        }
+        mathStylesInjected = true;
+      }
+
+      return plugin;
+    });
+  }
+  return loadMathPromise;
+}
+
+export function useMathPlugin(): MathPlugin | undefined {
+  const [plugin, setPlugin] = useState<MathPlugin | undefined>(
+    cachedMathPlugin ?? undefined,
+  );
+
+  useEffect(() => {
+    if (cachedMathPlugin) {
+      setPlugin(cachedMathPlugin);
+      return;
+    }
+    loadMathPlugin().then(setPlugin);
   }, []);
 
   return plugin;

@@ -7,12 +7,17 @@
  * - Automatic handling of unterminated markdown (incomplete code blocks, etc.)
  * - Built-in streaming cursor / caret support
  * - ~8x faster first-paint on large documents
+ *
+ * Citation support:
+ * - Inline [N] markers and reference section are pre-processed into wiki:// links
+ * - Clicking a citation navigates to the corresponding wiki page in Knowledge Base
  */
 
 import { memo } from 'react';
 import { Streamdown } from 'streamdown';
 import 'streamdown/styles.css';
-import { useCodePlugin } from '../../lib/streamdown-plugins';
+import { useCodePlugin, useMathPlugin } from '../../lib/streamdown-plugins';
+import { processCitationLinks, navigateToWikiPage, parseWikiHref } from '../../lib/citation-linkify';
 
 interface MarkdownRendererProps {
   content: string;
@@ -20,6 +25,8 @@ interface MarkdownRendererProps {
   /** Render mode: "streaming" for live token output, "static" for completed messages */
   mode?: 'streaming' | 'static';
 }
+
+const WIKI_HREF_PREFIX = '#wiki/';
 
 // Custom components for markdown elements
 const components = {
@@ -57,17 +64,36 @@ const components = {
     </blockquote>
   ),
 
-  // Links
-  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => (
-    <a
-      href={href}
-      target="_blank"
-      rel="noopener noreferrer"
-      className="text-primary hover:underline underline-offset-2"
-    >
-      {children}
-    </a>
-  ),
+  // Links — intercept #wiki/ fragment URLs for citation navigation
+  a: ({ href, children }: { href?: string; children?: React.ReactNode }) => {
+    const parsed = href ? parseWikiHref(href) : null;
+    if (parsed) {
+      return (
+        <a
+          href={href}
+          onClick={(e: React.MouseEvent) => {
+            e.preventDefault();
+            e.stopPropagation();
+            navigateToWikiPage(parsed.kbName, parsed.pageTitle);
+          }}
+          className="text-primary/80 hover:text-primary underline-offset-2 hover:underline cursor-pointer no-underline"
+        >
+          {children}
+        </a>
+      );
+    }
+
+    return (
+      <a
+        href={href}
+        target="_blank"
+        rel="noopener noreferrer"
+        className="text-primary hover:underline underline-offset-2"
+      >
+        {children}
+      </a>
+    );
+  },
 
   // Tables
   table: ({ children }: { children?: React.ReactNode }) => (
@@ -117,8 +143,12 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
   mode = 'static',
 }: MarkdownRendererProps) {
   const codePlugin = useCodePlugin();
+  const mathPlugin = useMathPlugin();
 
   if (!content) return null;
+
+  // Pre-process citation markers into wiki:// links
+  const processedContent = processCitationLinks(content);
 
   return (
     <div className={`markdown-content overflow-x-auto ${className}`}>
@@ -126,9 +156,12 @@ export const MarkdownRenderer = memo(function MarkdownRenderer({
         mode={mode}
         components={components as any}
         controls={{ code: true }}
-        plugins={codePlugin ? { code: codePlugin } : undefined}
+        plugins={{
+          code: codePlugin,
+          math: mathPlugin,
+        }}
       >
-        {content}
+        {processedContent}
       </Streamdown>
     </div>
   );

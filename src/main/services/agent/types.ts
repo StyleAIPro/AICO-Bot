@@ -91,6 +91,7 @@ export interface AgentRequest {
   model?: string; // Model to use (for future model switching)
   canvasContext?: CanvasContext; // Current canvas state for AI awareness
   agentId?: string; // Target agent ID for Hyper Space ('leader' or specific agent ID)
+  activeKnowledgeBases?: string[]; // Active knowledge base IDs for context injection
 }
 
 // ============================================
