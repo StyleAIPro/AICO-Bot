@@ -1,4 +1,4 @@
-import React, { useCallback, forwardRef, useEffect, useRef, useState } from 'react';
+import React, { useCallback, forwardRef, useEffect, useMemo, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   BookOpen,
@@ -202,6 +202,14 @@ export function KnowledgePage() {
   } = useKnowledgeBaseStore();
 
   const refluxProgress = useKnowledgeBaseStore((s) => s.refluxProgress);
+  const refluxBatchTotal = useKnowledgeBaseStore((s) => s.refluxBatchTotal);
+
+  const refluxPollingInfo = useMemo(() => {
+    const processing = sources.filter((s) => s.refluxStatus === 'processing').length;
+    if (processing === 0 || refluxBatchTotal === 0) return null;
+    const done = refluxBatchTotal - processing;
+    return { processing, total: refluxBatchTotal, done };
+  }, [sources, refluxBatchTotal]);
 
   const [queryInput, setQueryInput] = useState('');
   const [lintResult, setLintResult] = useState<{ issues: Array<{ type: string; severity: string; file: string; detail: string; relatedFile?: string }>; totalPages: number; healthScore: number } | null>(null);
@@ -264,7 +272,7 @@ export function KnowledgePage() {
   const [refluxMinimized, setRefluxMinimized] = useState(false);
   const [userAccount, setUserAccount] = useState('');
   const [userAccountError, setUserAccountError] = useState('');
-  const closeRefluxModal = () => { stopRefluxPolling(); if (currentKb) loadSources(currentKb.id); setRefluxModalOpen(false); setRefluxResult(null); setRefluxMinimized(false); setUserAccountError(''); };
+  const closeRefluxModal = () => { if (currentKb) loadSources(currentKb.id); setRefluxModalOpen(false); setRefluxResult(null); setRefluxMinimized(false); setUserAccountError(''); };
   const createNameRef = useRef<HTMLInputElement>(null);
 
   useEffect(() => {
@@ -391,7 +399,7 @@ export function KnowledgePage() {
   const handleReflux = async () => {
     if (!currentKb || refluxSelected.size === 0) return;
     const trimmed = userAccount.trim();
-    if (!trimmed || !/^[a-z]+\s\d{8}$/.test(trimmed)) {
+    if (!trimmed || !/^[a-z]+\s(\d{8}|wx\d{7})$/.test(trimmed)) {
       setUserAccountError('format_error');
       return;
     }
@@ -540,6 +548,23 @@ export function KnowledgePage() {
             >
               {t('kb.cancelIngest')}
             </button>
+          </div>
+        </div>
+      )}
+
+      {refluxPollingInfo && (
+        <div className="mx-6 mt-3 px-4 py-3 rounded-lg border border-blue-500/30 bg-blue-500/5 flex-shrink-0">
+          <div className="flex items-center justify-between mb-2">
+            <div className="flex items-center gap-2 text-sm">
+              <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
+              <span className="text-blue-500">{t('kb.refluxStatus.processing')} {refluxPollingInfo.done}/{refluxPollingInfo.total}</span>
+            </div>
+          </div>
+          <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
+            <div
+              className="h-full bg-blue-500 rounded-full transition-all duration-300"
+              style={{ width: `${(refluxPollingInfo.done / refluxPollingInfo.total) * 100}%` }}
+            />
           </div>
         </div>
       )}
@@ -1523,37 +1548,51 @@ export function KnowledgePage() {
                 <div className="space-y-3">
                   {(() => {
                     const newFiles = sources.filter((s) => !s.wasRefluxed);
-                    if (newFiles.length === 0) {
+                    const modifiedFiles = sources.filter((s) => s.wasRefluxed && s.fileChanged);
+                    if (newFiles.length === 0 && modifiedFiles.length === 0) {
                       return <div className="text-sm text-muted-foreground text-center py-8">{t('kb.noRefluxFiles')}</div>;
                     }
+                    const renderFile = (source: typeof newFiles[number]) => (
+                      <label key={source.id} className="flex items-center gap-3 px-2 py-2 rounded hover:bg-secondary cursor-pointer">
+                        <input
+                          type="checkbox"
+                          checked={refluxSelected.has(source.id)}
+                          onChange={(e) => setRefluxSelected((prev) => { const n = new Set(prev); e.target.checked ? n.add(source.id) : n.delete(source.id); return n; })}
+                          className="rounded border-gray-300"
+                        />
+                        <FileText className={`w-4 h-4 flex-shrink-0 ${source.wasRefluxed ? 'text-yellow-500' : 'text-green-500'}`} />
+                        <span className="text-sm flex-1 truncate">{source.storedName}</span>
+                        <span className="text-xs text-muted-foreground">{source.fileType}</span>
+                        <span className="text-xs text-muted-foreground">{formatFileSize(source.fileSize)}</span>
+                        {source.refluxStatus === 'processing' && (
+                          <span className="text-xs text-blue-500 px-1.5 py-0.5 rounded bg-blue-500/10">{t('kb.refluxStatus.processing')}</span>
+                        )}
+                        {source.refluxStatus === 'success' && (
+                          <span className="text-xs text-green-500 px-1.5 py-0.5 rounded bg-green-500/10">{t('kb.refluxStatus.success')}</span>
+                        )}
+                        {source.refluxStatus === 'failed' && (
+                          <span className="text-xs text-red-500 px-1.5 py-0.5 rounded bg-red-500/10">{t('kb.refluxStatus.failed')}</span>
+                        )}
+                      </label>
+                    );
                     return (
-                      <div>
-                        <div className="text-xs font-medium text-green-500 mb-1">{t('kb.refluxNew')} ({newFiles.length})</div>
-                        <div className="space-y-0.5">
-                          {newFiles.map((source) => (
-                            <label key={source.id} className="flex items-center gap-3 px-2 py-2 rounded hover:bg-secondary cursor-pointer">
-                              <input
-                                type="checkbox"
-                                checked={refluxSelected.has(source.id)}
-                                onChange={(e) => setRefluxSelected((prev) => { const n = new Set(prev); e.target.checked ? n.add(source.id) : n.delete(source.id); return n; })}
-                                className="rounded border-gray-300"
-                              />
-                              <FileText className="w-4 h-4 text-green-500 flex-shrink-0" />
-                              <span className="text-sm flex-1 truncate">{source.storedName}</span>
-                              <span className="text-xs text-muted-foreground">{source.fileType}</span>
-                              <span className="text-xs text-muted-foreground">{formatFileSize(source.fileSize)}</span>
-                              {source.refluxStatus === 'processing' && (
-                                <span className="text-xs text-blue-500 px-1.5 py-0.5 rounded bg-blue-500/10">{t('kb.refluxStatus.processing')}</span>
-                              )}
-                              {source.refluxStatus === 'success' && (
-                                <span className="text-xs text-green-500 px-1.5 py-0.5 rounded bg-green-500/10">{t('kb.refluxStatus.success')}</span>
-                              )}
-                              {source.refluxStatus === 'failed' && (
-                                <span className="text-xs text-red-500 px-1.5 py-0.5 rounded bg-red-500/10">{t('kb.refluxStatus.failed')}</span>
-                              )}
-                            </label>
-                          ))}
-                        </div>
+                      <div className="space-y-3">
+                        {newFiles.length > 0 && (
+                          <div>
+                            <div className="text-xs font-medium text-green-500 mb-1">{t('kb.refluxNew')} ({newFiles.length})</div>
+                            <div className="space-y-0.5 max-h-64 overflow-y-auto pr-1">
+                              {newFiles.map(renderFile)}
+                            </div>
+                          </div>
+                        )}
+                        {modifiedFiles.length > 0 && (
+                          <div>
+                            <div className="text-xs font-medium text-yellow-500 mb-1">{t('kb.refluxModified')} ({modifiedFiles.length})</div>
+                            <div className="space-y-0.5 max-h-64 overflow-y-auto pr-1">
+                              {modifiedFiles.map(renderFile)}
+                            </div>
+                          </div>
+                        )}
                       </div>
                     );
                   })()}

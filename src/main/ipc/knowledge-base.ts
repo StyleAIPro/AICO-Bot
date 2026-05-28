@@ -306,8 +306,6 @@ export function registerKnowledgeBaseHandlers(): void {
         if (global.gc) global.gc();
       }
 
-      sendProgress({ current: 0, total: 0, fileName: '' });
-
       if (!signal.aborted) {
         try {
           await svc.compile(kbId);
@@ -319,6 +317,8 @@ export function registerKnowledgeBaseHandlers(): void {
         svc.recountPages(kbId);
         svc.clearReportCache(kbId);
       }
+
+      sendProgress({ current: 0, total: 0, fileName: '' });
 
       return { success: true, data: total };
     } catch (error: unknown) {
@@ -450,8 +450,6 @@ export function registerKnowledgeBaseHandlers(): void {
         if (global.gc) global.gc();
       }
 
-      sendProgress({ current: 0, total: 0, fileName: '' });
-
       if (!signal.aborted) {
         try {
           await svc.compile(kbId);
@@ -463,6 +461,8 @@ export function registerKnowledgeBaseHandlers(): void {
         svc.recountPages(kbId);
         svc.clearReportCache(kbId);
       }
+
+      sendProgress({ current: 0, total: 0, fileName: '' });
 
       return { success: true, data: total };
     } catch (error: unknown) {

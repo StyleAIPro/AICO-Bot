@@ -1309,6 +1309,7 @@
   "kb.batchReflux": "批量回流",
   "kb.noRefluxFiles": "没有需要回流的文件",
   "kb.refluxNew": "未回流文件",
+  "kb.refluxModified": "已修改文件",
   "kb.refluxChanged": "更改",
   "kb.refluxing": "正在回流中...",
   "kb.refluxSuccess": "成功 {{count}} 个",

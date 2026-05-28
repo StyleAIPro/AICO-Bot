@@ -1321,6 +1321,7 @@
   "kb.batchReflux": "Batch Reflux",
   "kb.noRefluxFiles": "No files need reflux",
   "kb.refluxNew": "Not refluxed",
+  "kb.refluxModified": "Modified files",
   "kb.refluxChanged": "Changed",
   "kb.refluxing": "Refluxing...",
   "kb.refluxSuccess": "{{count}} succeeded",

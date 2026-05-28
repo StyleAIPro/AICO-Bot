@@ -49,6 +49,7 @@ interface KnowledgeBaseState {
   activeKnowledgeBaseIds: string[];
   ingestProgress: { current: number; total: number; fileName: string } | null;
   refluxProgress: { current: number; total: number; fileName: string } | null;
+  refluxBatchTotal: number;
   refluxPollingTimer: ReturnType<typeof setTimeout> | null;
   ingestingKbId: string | null;
   wikiUpdatedCounter: number;
@@ -94,6 +95,7 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   activeKnowledgeBaseIds: [],
   ingestProgress: null,
   refluxProgress: null,
+  refluxBatchTotal: 0,
   refluxPollingTimer: null,
   ingestingKbId: null,
   wikiUpdatedCounter: 0,
@@ -252,9 +254,11 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
       const res = await kbApi.kbRefluxSources(kbId, sourceIds, userAccount);
       if (res.success) {
         await get().loadSources(kbId);
-        set({ loadingAction: null, loading: false });
+        const data = res.data as { success: number; failed: number; errors: string[] } | null;
+        const batchTotal = (data?.success ?? 0) + (data?.failed ?? 0);
+        set({ loadingAction: null, loading: false, refluxBatchTotal: batchTotal });
         get().startRefluxPolling(kbId);
-        return res.data as { success: number; failed: number; errors: string[] };
+        return data;
       } else {
         set({ error: res.error ?? 'Unknown error', loadingAction: null, loading: false });
         return null;
@@ -271,7 +275,7 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
     const timer = get().refluxPollingTimer;
     if (timer) {
       clearTimeout(timer);
-      set({ refluxPollingTimer: null });
+      set({ refluxPollingTimer: null, refluxBatchTotal: 0 });
     }
   },
 
@@ -563,7 +567,7 @@ if (typeof window !== 'undefined' && window.aicoBot) {
         state.loadWikiPages(state.currentKb.id, true);
       }
     }
-    useKnowledgeBase.setState(updates);
+    useKnowledgeBaseStore.setState(updates);
   });
 
   // Subscribe to reflux progress events from main process

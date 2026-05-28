@@ -27,7 +27,7 @@ export class KbLlmCaller {
     const sanitized = this.sanitizeMessages(messages);
 
     const timeoutController = new AbortController();
-    const timeout = setTimeout(() => timeoutController.abort(), 300_000);
+    const timeout = setTimeout(() => timeoutController.abort(), 600_000);
 
     function onExternalAbort(): void { timeoutController.abort(); }
     signal?.addEventListener('abort', onExternalAbort, { once: true });
