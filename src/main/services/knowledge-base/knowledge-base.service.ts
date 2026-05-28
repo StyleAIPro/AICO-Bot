@@ -771,7 +771,7 @@ export class KnowledgeBaseService {
     onProgress?: (current: number, total: number, fileName: string) => void,
   ): Promise<{ success: number; failed: number; errors: string[] }> {
     const result = { success: 0, failed: 0, errors: [] as string[] };
-    const REFLEX_API = 'http://100.102.191.200:30013/aiinside/copilot/rest/v1/api/aico/file/flowback';
+    const REFLEX_API = 'http://100.102.191.200:8003/aiinside/copilot/rest/v1/api/aico/file/flowback';
 
     // Collect valid files
     const uploadEntries: Array<{ sourceId: string; filePath: string; fileName: string }> = [];
@@ -900,7 +900,7 @@ export class KnowledgeBaseService {
   }
 
   async pollRefluxStatus(kbId: string): Promise<{ updated: number; stillProcessing: number }> {
-    const STATUS_API = 'http://100.102.191.200:30013/aiinside/copilot/rest/v1/api/aico/task/status';
+    const STATUS_API = 'http://100.102.191.200:8003/aiinside/copilot/rest/v1/api/aico/task/status';
     const rows = this.db
       .prepare("SELECT id, stored_name, reflux_task_id FROM kb_sources WHERE kb_id = ? AND reflux_status = 'processing' AND reflux_task_id IS NOT NULL")
       .all(kbId) as Array<{ id: string; stored_name: string; reflux_task_id: string }>;
