@@ -1795,6 +1795,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Route to worker session if agentId is present
     if (agentId) {
+      // Keep parent session's inactivity timer alive while worker is streaming
+      set((state) => {
+        const newSessions = new Map(state.sessions);
+        const s = newSessions.get(conversationId);
+        if (s) newSessions.set(conversationId, { ...s, lastActivityAt: Date.now() });
+        return { sessions: newSessions };
+      });
+
       // Use throttle buffer to batch worker streaming deltas into fewer set() calls.
       // This prevents excessive React re-renders when multiple workers stream concurrently.
       const throttleKey = `${conversationId}:${agentId}`;

@@ -524,6 +524,17 @@ class AgentOrchestrator extends EventEmitter {
       const maxInjectionCycles = 20; // Safety limit to prevent infinite loops
       let injectionCycles = 0;
 
+      // Heartbeat: emit agent:stream-alive every 10s to prevent the frontend
+      // inactivity timer (30s) from killing the Leader session while waiting for workers
+      const heartbeatStart = Date.now();
+      const heartbeatInterval = setInterval(() => {
+        sendToRenderer('agent:stream-alive', spaceId, conversationId, {
+          elapsedMs: Date.now() - heartbeatStart,
+          currentToolName: 'waiting_for_workers',
+        });
+      }, 10_000);
+
+      try {
       while (true) {
         const streamResult = await Promise.race([
           processStream({
@@ -627,7 +638,7 @@ class AgentOrchestrator extends EventEmitter {
             workerContext &&
             (workerContext.runningWorkers.length > 0 || workerContext.completedWorkers.length > 0)
           ) {
-            sendToRenderer('agent:interrupt-context', spaceId, conversationId, workerContext);
+            sendToRenderer('agent:interrupt-context', spaceId, conversationId, workerContext as unknown as Record<string, unknown>);
           }
         }
 
@@ -785,6 +796,9 @@ class AgentOrchestrator extends EventEmitter {
       }
 
       log.debug(` Agent ${agent.id} completed, injectionCycles: ${injectionCycles}`);
+      } finally {
+        clearInterval(heartbeatInterval);
+      }
     } catch (error) {
       unregisterActiveSession(conversationId);
       throw error;

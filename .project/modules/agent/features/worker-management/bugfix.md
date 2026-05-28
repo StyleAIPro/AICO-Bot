@@ -89,3 +89,11 @@
 - **文件**：`src/main/services/agent/orchestrator.ts`, `src/renderer/stores/chat.store.ts`, `src/shared/types/hyper-space.ts`
 - **问题**：Leader 流中断后点击「继续」只发送纯文本 `"continue"`，不含 Worker 任务状态。大任务场景下 Leader LLM 完全丢失上下文，不知道 Worker 在执行什么、哪些已完成。
 - **修复**：orchestrator 中断时收集 Worker 上下文（running + completed）通过 `agent:interrupt-context` 事件传递到前端；前端保存到 session state；`continueAfterInterrupt` 恢复时将 Worker 状态注入消息；同时预消费遗留 injection 队列。
+
+### BUG-011：Leader 30 秒假超时误杀 Worker 会话
+
+- **修复日期**：2026-05-28
+- **严重程度**：Critical
+- **文件**：`src/main/services/agent/orchestrator.ts`, `src/renderer/stores/chat.store.ts`
+- **问题**：Leader 等待 Worker 执行期间不发送前端事件，30 秒不活跃计时器触发后调用 `stopGeneration()` 杀掉 Leader 会话，导致 Worker 掉线。根因：本地 session 无心跳机制 + `handleAgentMessage` worker 路径不更新 `lastActivityAt`。
+- **修复**：orchestrator 在 `executeAgentLocally` while 循环期间每 10 秒发送 `agent:stream-alive` 心跳；`handleAgentMessage` worker 路径更新父 session 的 `lastActivityAt`。
