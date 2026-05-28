@@ -22,6 +22,7 @@ import type {
   SubagentTaskStatus,
   SubagentAnnouncement,
   AggregationStrategy,
+  InterruptWorkerContext,
 } from '../../../shared/types/hyper-space';
 import {
   createOrchestrationConfig,
@@ -29,7 +30,7 @@ import {
 import { getConversation, getMessageThoughts, updateLastMessage } from '../conversation.service';
 import { extractFileChangesSummaryFromThoughts } from '../../../shared/file-changes';
 import type { Thought } from './types';
-import { mailboxService } from './mailbox';
+import { mailboxService, MAX_RESULT_SIZE } from './mailbox';
 import { taskboardService } from './taskboard';
 
 // ============================================
@@ -144,6 +145,9 @@ class AgentOrchestrator extends EventEmitter {
 
   /** Maximum concurrent children per agent */
   private readonly maxChildrenPerAgent = 5;
+
+  /** processStream timeout per call (30 min) to prevent indefinite blocking */
+  private readonly processStreamTimeout = 30 * 60 * 1000;
 
   /** Stall detection timer */
   private stallCheckInterval: NodeJS.Timeout | null = null;
@@ -497,12 +501,32 @@ class AgentOrchestrator extends EventEmitter {
       // When a worker completes, queueInjection() stores the announcement.
       // processStream returns hasPendingInjection=true at stream end if an injection is queued.
       // We pick it up and continue the loop so the Leader LLM processes the result.
-      let currentMessageContent = task;
+
+      // Pre-consume stale injections from a previous interrupted session.
+      // Workers may have completed and queued results while the Leader was interrupted.
+      let enrichedTask = task;
+      if (hasPendingInjection(conversationId)) {
+        const staleInjections: string[] = [];
+        while (hasPendingInjection(conversationId)) {
+          const inj = getAndClearInjection(conversationId);
+          if (inj) staleInjections.push(inj.content);
+        }
+        if (staleInjections.length > 0) {
+          enrichedTask =
+            `[Previous Worker Results (from interrupted session)]\n${staleInjections.join('\n\n')}\n\n---\n\n${task}`;
+          log.info(
+            `[${conversationId}] Pre-consumed ${staleInjections.length} stale injection(s) for resumed session`,
+          );
+        }
+      }
+
+      let currentMessageContent = enrichedTask;
       const maxInjectionCycles = 20; // Safety limit to prevent infinite loops
       let injectionCycles = 0;
 
       while (true) {
-        const streamResult = await processStream({
+        const streamResult = await Promise.race([
+          processStream({
           v2Session: session,
           sessionState,
           spaceId,
@@ -571,7 +595,41 @@ class AgentOrchestrator extends EventEmitter {
               }
             },
           },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`processStream timed out after ${this.processStreamTimeout / 1000}s`)),
+            this.processStreamTimeout,
+          ),
+        ),
+        ]).catch(async (err: unknown) => {
+          if (err instanceof Error && err.message.includes('timed out')) {
+            console.error(`[Orchestrator] ${err.message}, aborting and continuing`);
+            try { abortController.abort(); } catch {}
+            const { hasPendingInjection } = await import('./stream-processor');
+            return {
+              finalContent: '',
+              thoughts: [],
+              tokenUsage: undefined,
+              hasPendingInjection: hasPendingInjection(conversationId),
+              interrupted: true,
+              errorThought: undefined,
+            } as unknown as Awaited<ReturnType<typeof processStream>>;
+          }
+          throw err;
         });
+
+        // If the stream was interrupted and there are active workers,
+        // collect worker context and send to the renderer for the "continue" flow
+        if (streamResult.isInterrupted) {
+          const workerContext = this.collectInterruptWorkerContext(conversationId);
+          if (
+            workerContext &&
+            (workerContext.runningWorkers.length > 0 || workerContext.completedWorkers.length > 0)
+          ) {
+            sendToRenderer('agent:interrupt-context', spaceId, conversationId, workerContext);
+          }
+        }
 
         // Check for worker announcement injection (worker completion notification)
         if (streamResult.hasPendingInjection) {
@@ -1725,6 +1783,45 @@ Respond with a JSON array of agent IDs that should handle this task.`;
   }
 
   /**
+   * Collect worker context when Leader stream is interrupted.
+   * Returns running and recently completed workers for the given conversation.
+   */
+  private collectInterruptWorkerContext(conversationId: string): InterruptWorkerContext | null {
+    const runningWorkers: InterruptWorkerContext['runningWorkers'] = [];
+    const completedWorkers: InterruptWorkerContext['completedWorkers'] = [];
+
+    const team = this.getTeamByConversation(conversationId);
+
+    for (const [taskId, task] of this.tasks) {
+      if (task.parentConversationId !== conversationId) continue;
+
+      const agent = team ? team.workers.find((w) => w.id === task.agentId) : undefined;
+      const agentName = agent?.config.name || task.agentId;
+
+      if (task.status === 'running') {
+        runningWorkers.push({
+          taskId,
+          agentId: task.agentId,
+          agentName,
+          task: task.task,
+          startedAt: task.startedAt,
+        });
+      } else if (task.status === 'completed' || task.status === 'failed') {
+        completedWorkers.push({
+          taskId,
+          agentId: task.agentId,
+          agentName,
+          result: task.result,
+          error: task.error,
+        });
+      }
+    }
+
+    if (runningWorkers.length === 0 && completedWorkers.length === 0) return null;
+    return { runningWorkers, completedWorkers };
+  }
+
+  /**
    * Wait for all pending tasks to complete.
    * Supports heartbeat extension: if any pending worker updates its heartbeat,
    * the timeout is extended, preventing premature timeout on long-running tasks.
@@ -2038,6 +2135,7 @@ just complete the task normally — the orchestrator will collect your results a
       }
 
       const sessionState = createSessionState(team.spaceId, childConversationId, abortController);
+      registerActiveSession(childConversationId, sessionState);
 
       // Notify frontend that a worker has started
       const { sendToRenderer } = await import('./helpers');
@@ -2051,22 +2149,25 @@ just complete the task normally — the orchestrator will collect your results a
       });
 
       // Process stream with events forwarded to parent conversation
-      const streamResult = await processStream({
-        v2Session: session,
-        sessionState,
-        spaceId: team.spaceId,
-        conversationId: childConversationId,
-        rendererConversationId: subtask.parentConversationId, // Forward to parent UI
-        suppressComplete: true, // Don't signal parent conversation as complete
-        workerInfo: { agentId: agent.id, agentName: agent.config.name || agent.id }, // Tag events for worker panel
-        messageContent: subtask.task,
-        displayModel: resolvedCredentials.displayModel || 'claude-sonnet-4-6',
-        abortController,
-        t0: Date.now(),
-        contextWindow: resolvedCredentials.contextWindow,
-        callbacks: {
-          onComplete: (result) => {
-            // Accumulate worker thoughts into team for batch persistence
+      // Wrap with timeout to prevent indefinite blocking
+      const streamResult = await Promise.race([
+        processStream({
+          v2Session: session,
+          sessionState,
+          spaceId: team.spaceId,
+          conversationId: childConversationId,
+          rendererConversationId: subtask.parentConversationId, // Forward to parent UI
+          suppressComplete: true, // Don't signal parent conversation as complete
+          workerInfo: { agentId: agent.id, agentName: agent.config.name || agent.id }, // Tag events for worker panel
+          messageContent: subtask.task,
+          displayModel: resolvedCredentials.displayModel || 'claude-sonnet-4-6',
+          abortController,
+          t0: Date.now(),
+          contextWindow: resolvedCredentials.contextWindow,
+          callbacks: {
+            onComplete: (result) => {
+              unregisterActiveSession(childConversationId);
+              // Accumulate worker thoughts into team for batch persistence
             if (result.thoughts.length > 0) {
               team.turnThoughts.push(...result.thoughts);
             }
@@ -2086,6 +2187,28 @@ just complete the task normally — the orchestrator will collect your results a
             }
           },
         },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Worker processStream timed out after ${this.processStreamTimeout / 1000}s`)),
+            this.processStreamTimeout,
+          ),
+        ),
+      ]).catch((err: unknown) => {
+        if (err instanceof Error && err.message.includes('timed out')) {
+          console.error(`[Orchestrator] Worker ${agent.id} ${err.message}, aborting`);
+          try { abortController.abort(); } catch {}
+          unregisterActiveSession(childConversationId);
+          return {
+            finalContent: '',
+            thoughts: [],
+            tokenUsage: undefined,
+            hasPendingInjection: false,
+            interrupted: true,
+            errorThought: undefined,
+          } as unknown as Awaited<ReturnType<typeof processStream>>;
+        }
+        throw err;
       });
 
       const result = streamResult.finalContent;
@@ -2120,6 +2243,7 @@ just complete the task normally — the orchestrator will collect your results a
       agent.status = 'idle';
       log.debug(` Local subtask ${subtask.id} completed`);
     } catch (error) {
+      unregisterActiveSession(childConversationId);
       // Notify frontend that worker has failed
       const { sendToRenderer } = await import('./helpers');
 
@@ -3292,19 +3416,31 @@ just complete the task normally — the orchestrator will collect your results a
       }
 
       if (announcement.result) {
-        message += `\n**Result**:\n${announcement.result}\n`;
+        message += `\n**Result**:\n${this.truncateResult(announcement.result)}\n`;
       }
     } else {
       message += `**Status**: Failed\n`;
 
       if (announcement.result) {
-        message += `**Error**: ${announcement.result}\n`;
+        message += `**Error**: ${this.truncateResult(announcement.result)}\n`;
       }
     }
 
     message += `\nTask ID: ${announcement.taskId}`;
 
     return message;
+  }
+
+  /**
+   * Truncate a worker result to MAX_RESULT_SIZE to prevent oversized injections.
+   */
+  private truncateResult(result: string): string {
+    const size = Buffer.byteLength(result, 'utf-8');
+    if (size <= MAX_RESULT_SIZE) return result;
+    console.warn(
+      `[Orchestrator] Worker result too large (${size} bytes), truncating to ${MAX_RESULT_SIZE}`,
+    );
+    return result.slice(0, MAX_RESULT_SIZE) + `\n\n[... truncated, original size: ${size} bytes]`;
   }
 
   /**
@@ -3357,7 +3493,7 @@ just complete the task normally — the orchestrator will collect your results a
    * The queued message will be picked up by processStream()'s turn-boundary
    * detection and processed in the existing while(true) loop in send-message.ts.
    */
-  private async injectMessageToSession(
+  async injectMessageToSession(
     spaceId: string,
     conversationId: string,
     message: string,

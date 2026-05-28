@@ -303,6 +303,7 @@ export function onEvent(channel: string, callback: (data: unknown) => void): () 
       'agent:permission-request': 'onAgentPermissionRequest',
       'agent:turn-boundary': 'onAgentTurnBoundary',
       'agent:injection-start': 'onAgentInjectionStart',
+      'agent:interrupt-context': 'onAgentInterruptContext',
       'remote:status-change': 'onRemoteStatusChange',
       'browser:state-change': 'onBrowserStateChange',
       'browser:all-views-hidden': 'onBrowserAllViewsHidden',

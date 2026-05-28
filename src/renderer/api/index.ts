@@ -991,6 +991,8 @@ export const api = {
     onEvent('agent:turn-boundary', callback),
   onAgentInjectionStart: (callback: (data: unknown) => void) =>
     onEvent('agent:injection-start', callback),
+  onAgentInterruptContext: (callback: (data: unknown) => void) =>
+    onEvent('agent:interrupt-context', callback),
   onAgentTeamMessage: (callback: (data: unknown) => void) =>
     onEvent('agent:team-message', callback),
   onWorkerStarted: (callback: (data: unknown) => void) => onEvent('worker:started', callback),

@@ -233,6 +233,29 @@ export interface SubagentTask {
 }
 
 /**
+ * Worker context captured when Leader stream is interrupted.
+ * Passed to frontend via agent:error event so that "continue" can include worker state.
+ */
+export interface InterruptWorkerContext {
+  /** Workers still running when the interruption occurred */
+  runningWorkers: Array<{
+    taskId: string;
+    agentId: string;
+    agentName: string;
+    task: string;
+    startedAt?: number;
+  }>;
+  /** Workers that completed but whose results were not yet consumed by the Leader */
+  completedWorkers: Array<{
+    taskId: string;
+    agentId: string;
+    agentName: string;
+    result?: string;
+    error?: string;
+  }>;
+}
+
+/**
  * Announcement message from subagent
  */
 export interface SubagentAnnouncement {
