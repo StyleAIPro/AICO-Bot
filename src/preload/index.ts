@@ -159,6 +159,47 @@ export interface AicoBotAPI {
   }) => Promise<IpcResponse>;
   rejectQuestion: (data: { id: string; reason?: string }) => Promise<IpcResponse>;
   resolveAgentPermission: (data: { id: string; approved: boolean; conversationId?: string }) => Promise<IpcResponse>;
+
+  // Knowledge Base
+  kbList: () => Promise<IpcResponse>;
+  kbGet: (id: string) => Promise<IpcResponse>;
+  kbCreate: (input: { name: string; description?: string; icon?: string }) => Promise<IpcResponse>;
+  kbUpdate: (id: string, updates: Record<string, unknown>) => Promise<IpcResponse>;
+  kbDelete: (id: string) => Promise<IpcResponse>;
+  kbImportFiles: (kbId: string, filePaths: string[]) => Promise<IpcResponse>;
+  kbImportFolder: (kbId: string, folderPath: string) => Promise<IpcResponse>;
+  kbRemoveSource: (kbId: string, sourceId: string) => Promise<IpcResponse>;
+  kbListSources: (kbId: string) => Promise<IpcResponse>;
+  kbRefluxSources: (kbId: string, sourceIds: string[], userAccount: string) => Promise<IpcResponse>;
+  kbPollRefluxStatus: (kbId: string) => Promise<IpcResponse>;
+  kbSaveConversation: (kbId: string, spaceId: string, conversationId: string) => Promise<IpcResponse>;
+  kbListConversations: (kbId: string) => Promise<IpcResponse>;
+  kbIngest: (kbId: string, sourceId: string) => Promise<IpcResponse>;
+  kbIngestAll: (kbId: string) => Promise<IpcResponse>;
+  kbIngestIncremental: (kbId: string) => Promise<IpcResponse>;
+  kbCancelIngest: (kbId: string) => Promise<IpcResponse>;
+  kbRecompile: (kbId: string) => Promise<IpcResponse>;
+  kbCompile: (kbId: string) => Promise<IpcResponse>;
+  kbQuery: (kbId: string, question: string) => Promise<IpcResponse>;
+  kbLint: (kbId: string) => Promise<IpcResponse>;
+  kbGenerateReport: (kbId: string) => Promise<IpcResponse>;
+  kbLoadReport: (kbId: string) => Promise<IpcResponse>;
+  kbAudit: (kbId: string, correction: unknown) => Promise<IpcResponse>;
+  kbListPages: (kbId: string) => Promise<IpcResponse>;
+  kbReadPage: (kbId: string, pagePath: string) => Promise<IpcResponse>;
+  kbReadSource: (kbId: string, sourceId: string) => Promise<IpcResponse>;
+  kbUpdatePage: (kbId: string, pagePath: string, content: string) => Promise<IpcResponse>;
+  kbGetPageLinks: (kbId: string, pagePath: string) => Promise<IpcResponse>;
+  kbDeletePage: (kbId: string, pagePath: string) => Promise<IpcResponse>;
+  kbOpenSourceBrowser: (kbId: string, sourceId: string) => Promise<IpcResponse>;
+  kbOpenSourceDefault: (kbId: string, sourceId: string) => Promise<IpcResponse>;
+  kbGetGraph: (kbId: string) => Promise<IpcResponse>;
+  kbSelectFile: () => Promise<IpcResponse>;
+  kbSelectFolder: () => Promise<IpcResponse>;
+  onKbIngestProgress: (callback: (data: { current: number; total: number; fileName: string; sourceId?: string; completedSourceId?: string }) => void) => (() => void);
+  onKbRefluxProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) => (() => void);
+  onKbRefluxStatusUpdate: (callback: (data: { kbId: string }) => void) => (() => void);
+
   compactContext: (conversationId: string) => Promise<IpcResponse>;
   continueIdleTimeout: (conversationId: string) => Promise<IpcResponse>;
   forceIdleTimeout: (conversationId: string) => Promise<IpcResponse>;
@@ -843,6 +884,80 @@ const api: AicoBotAPI = {
   answerQuestion: (data) => ipcRenderer.invoke('agent:answer-question', data),
   rejectQuestion: (data) => ipcRenderer.invoke('agent:reject-question', data),
   resolveAgentPermission: (data) => ipcRenderer.invoke('agent:resolve-permission', data),
+
+  // Knowledge Base
+  kbList: () => ipcRenderer.invoke('knowledge-base:list'),
+  kbGet: (id: string) => ipcRenderer.invoke('knowledge-base:get', id),
+  kbCreate: (input: { name: string; description?: string; icon?: string }) =>
+    ipcRenderer.invoke('knowledge-base:create', input),
+  kbUpdate: (id: string, updates: Record<string, unknown>) =>
+    ipcRenderer.invoke('knowledge-base:update', id, updates),
+  kbDelete: (id: string) => ipcRenderer.invoke('knowledge-base:delete', id),
+  kbImportFiles: (kbId: string, filePaths: string[]) =>
+    ipcRenderer.invoke('knowledge-base:import-files', kbId, filePaths),
+  kbImportFolder: (kbId: string, folderPath: string) =>
+    ipcRenderer.invoke('knowledge-base:import-folder', kbId, folderPath),
+  kbRemoveSource: (kbId: string, sourceId: string) =>
+    ipcRenderer.invoke('knowledge-base:remove-source', kbId, sourceId),
+  kbListSources: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:list-sources', kbId),
+  kbRefluxSources: (kbId: string, sourceIds: string[], userAccount: string) =>
+    ipcRenderer.invoke('knowledge-base:reflux-sources', kbId, sourceIds, userAccount),
+  kbPollRefluxStatus: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:poll-reflux-status', kbId),
+  kbSaveConversation: (kbId: string, spaceId: string, conversationId: string) =>
+    ipcRenderer.invoke('knowledge-base:save-conversation', kbId, spaceId, conversationId),
+  kbListConversations: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:list-conversations', kbId),
+  kbIngest: (kbId: string, sourceId: string) =>
+    ipcRenderer.invoke('knowledge-base:ingest', kbId, sourceId),
+  kbIngestAll: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:ingest-all', kbId),
+  kbIngestIncremental: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:ingest-incremental', kbId),
+  kbCancelIngest: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:ingest-cancel', kbId),
+  kbRecompile: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:recompile', kbId),
+  kbCompile: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:compile', kbId),
+  kbQuery: (kbId: string, question: string) =>
+    ipcRenderer.invoke('knowledge-base:query', kbId, question),
+  kbLint: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:lint', kbId),
+  kbGenerateReport: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:generate-report', kbId),
+  kbLoadReport: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:load-report', kbId),
+  kbAudit: (kbId: string, correction: unknown) =>
+    ipcRenderer.invoke('knowledge-base:audit', kbId, correction),
+  kbListPages: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:list-pages', kbId),
+  kbReadPage: (kbId: string, pagePath: string) =>
+    ipcRenderer.invoke('knowledge-base:read-page', kbId, pagePath),
+  kbReadSource: (kbId: string, sourceId: string) =>
+    ipcRenderer.invoke('knowledge-base:read-source', kbId, sourceId),
+  kbUpdatePage: (kbId: string, pagePath: string, content: string) =>
+    ipcRenderer.invoke('knowledge-base:update-page', kbId, pagePath, content),
+  kbGetPageLinks: (kbId: string, pagePath: string) =>
+    ipcRenderer.invoke('knowledge-base:get-page-links', kbId, pagePath),
+  kbDeletePage: (kbId: string, pagePath: string) =>
+    ipcRenderer.invoke('knowledge-base:delete-page', kbId, pagePath),
+  kbOpenSourceBrowser: (kbId: string, sourceId: string) =>
+    ipcRenderer.invoke('knowledge-base:open-source-browser', kbId, sourceId),
+  kbOpenSourceDefault: (kbId: string, sourceId: string) =>
+    ipcRenderer.invoke('knowledge-base:open-source-default', kbId, sourceId),
+  kbGetGraph: (kbId: string) =>
+    ipcRenderer.invoke('knowledge-base:get-graph-data', kbId),
+  kbSelectFile: () => ipcRenderer.invoke('knowledge-base:select-file'),
+  kbSelectFolder: () => ipcRenderer.invoke('knowledge-base:select-folder'),
+  onKbIngestProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) =>
+    createEventListener('knowledge-base:ingest-progress', callback),
+  onKbRefluxProgress: (callback: (data: { current: number; total: number; fileName: string }) => void) =>
+    createEventListener('knowledge-base:reflux-progress', callback),
+  onKbRefluxStatusUpdate: (callback: (data: { kbId: string }) => void) =>
+    createEventListener('knowledge-base:reflux-status-update', callback),
+
   compactContext: (conversationId) => ipcRenderer.invoke('agent:compact-context', conversationId),
   continueIdleTimeout: (conversationId) => ipcRenderer.invoke('agent:continue-idle-timeout', conversationId),
   forceIdleTimeout: (conversationId) => ipcRenderer.invoke('agent:force-idle-timeout', conversationId),

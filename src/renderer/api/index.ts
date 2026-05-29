@@ -493,6 +493,7 @@ export const api = {
       }>;
     };
     agentId?: string; // Target agent ID for Hyper Space ('leader' or specific agent ID)
+    activeKnowledgeBases?: string[]; // Active knowledge base IDs for context injection
   }): Promise<ApiResponse> => {
     // Subscribe to conversation events and WAIT for server acknowledgment before sending.
     // This prevents the race condition where events (e.g., worker:started) are

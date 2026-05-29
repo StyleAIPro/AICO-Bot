@@ -45,9 +45,12 @@ import {
   Wrench,
   Cloud,
   Monitor,
+  BookOpen,
+  Check,
 } from 'lucide-react';
 import { useOnboardingStore } from '../../stores/onboarding.store';
 import { useAIBrowserStore } from '../../stores/ai-browser.store';
+import { useKnowledgeBaseStore } from '../../stores/knowledge-base.store';
 import { useSpaceStore } from '../../stores/space.store';
 import { useChatStore } from '../../stores/chat.store';
 import { getOnboardingPrompt } from '../onboarding/onboardingData';
@@ -112,7 +115,13 @@ function InputAreaInternal(
   const [content, setContent] = useState('');
   const [isFocused, setIsFocused] = useState(false);
   const [thinkingEnabled, setThinkingEnabled] = useState(false); // Extended thinking mode
+
+  // Clear input when switching conversations
+  useEffect(() => {
+    setContent('');
+  }, [conversationId]);
   const [showAttachMenu, setShowAttachMenu] = useState(false); // Attachment menu visibility
+  const [showKbMenu, setShowKbMenu] = useState(false); // Knowledge base menu visibility
   const [isCompacting, setIsCompacting] = useState(false); // Context compression in progress
   const [compactResult, setCompactResult] = useState<'success' | 'error' | null>(null); // Compression result notification
 
@@ -121,6 +130,14 @@ function InputAreaInternal(
 
   // AI Browser state
   const { enabled: aiBrowserEnabled, setEnabled: setAIBrowserEnabled } = useAIBrowserStore();
+
+  // Knowledge base state
+  const {
+    knowledgeBases,
+    activeKnowledgeBaseIds,
+    toggleActiveKb,
+    loadKnowledgeBases,
+  } = useKnowledgeBaseStore();
 
   // Space state - to determine if this is a local, remote, or hyper space
   const currentSpaceId = useSpaceStore((state) => state.currentSpace?.id);
@@ -306,6 +323,27 @@ function InputAreaInternal(
       return () => document.removeEventListener('mousedown', handleClickOutside);
     }
   }, [showAttachMenu]);
+
+  // Close KB menu when clicking outside
+  useEffect(() => {
+    const handleClickOutside = (event: MouseEvent) => {
+      const target = event.target as HTMLElement;
+      if (!target.closest('[data-kb-menu]')) {
+        setShowKbMenu(false);
+      }
+    };
+    if (showKbMenu) {
+      document.addEventListener('mousedown', handleClickOutside);
+      return () => document.removeEventListener('mousedown', handleClickOutside);
+    }
+  }, [showKbMenu]);
+
+  // Load knowledge bases on first render
+  useEffect(() => {
+    if (knowledgeBases.length === 0) {
+      loadKnowledgeBases();
+    }
+  }, []);
 
   // Onboarding state
   const { isActive: isOnboarding, currentStep } = useOnboardingStore();
@@ -632,6 +670,12 @@ function InputAreaInternal(
             onStop={onStop}
             onCompactContext={handleCompactContext}
             isCompacting={isCompacting}
+            showKbMenu={showKbMenu}
+            onKbMenuToggle={() => setShowKbMenu(!showKbMenu)}
+            knowledgeBases={knowledgeBases}
+            activeKnowledgeBaseIds={activeKnowledgeBaseIds}
+            onToggleKb={toggleActiveKb}
+            activeCount={activeKnowledgeBaseIds.length}
             contextUsage={contextUsage}
           />
         </div>
@@ -693,9 +737,9 @@ function ContextUsageDisplay({
  */
 interface InputToolbarProps {
   isGenerating: boolean;
-  isStopping: boolean; // True when user clicked stop, waiting for cleanup
-  pendingCount: number; // Number of messages waiting in queue
-  onClearPending?: () => void; // Clear pending messages
+  isStopping: boolean;
+  pendingCount: number;
+  onClearPending?: () => void;
   isOnboarding: boolean;
   isProcessingImages: boolean;
   thinkingEnabled: boolean;
@@ -713,6 +757,12 @@ interface InputToolbarProps {
   onStop: () => void;
   onCompactContext: () => void;
   isCompacting: boolean;
+  showKbMenu: boolean;
+  onKbMenuToggle: () => void;
+  knowledgeBases: Array<{ id: string; name: string }>;
+  activeKnowledgeBaseIds: string[];
+  onToggleKb: (kbId: string) => void;
+  activeCount: number;
   contextUsage?: {
     inputTokens: number;
     outputTokens: number;
@@ -744,6 +794,12 @@ function InputToolbar({
   onStop,
   onCompactContext,
   isCompacting,
+  showKbMenu,
+  onKbMenuToggle,
+  knowledgeBases,
+  activeKnowledgeBaseIds,
+  onToggleKb,
+  activeCount,
   contextUsage,
 }: InputToolbarProps) {
   const { t } = useTranslation();
@@ -869,6 +925,71 @@ function InputToolbar({
             {isCompacting ? <Loader2 size={15} className="animate-spin" /> : <Boxes size={15} />}
             <span className="text-xs">{t('Compress')}</span>
           </button>
+        )}
+
+        {/* Knowledge base selector */}
+        {!isGenerating && !isOnboarding && (
+          <div className="relative" data-kb-menu>
+            <button
+              onClick={onKbMenuToggle}
+              className={`h-8 flex items-center gap-1.5 px-2.5 rounded-lg
+                transition-colors duration-200 relative
+                ${
+                  activeCount > 0
+                    ? 'bg-emerald-500/10 text-emerald-600 dark:text-emerald-400'
+                    : showKbMenu
+                      ? 'bg-primary/10 text-primary'
+                      : 'text-muted-foreground/50 hover:text-muted-foreground hover:bg-muted/50'
+                }
+              `}
+              title="本地知识库"
+            >
+              <BookOpen size={15} />
+              <span className="text-xs">本地知识库</span>
+              {activeCount > 0 && (
+                <span className="ml-0.5 min-w-[16px] h-4 flex items-center justify-center px-1 rounded-full bg-emerald-500 text-white text-[10px] leading-none">
+                  {activeCount}
+                </span>
+              )}
+            </button>
+
+            {showKbMenu && (
+              <div
+                className="absolute bottom-full left-0 mb-2 py-1.5 bg-popover border border-border
+                  rounded-xl shadow-lg min-w-[200px] max-h-[300px] overflow-y-auto z-20 animate-fade-in"
+              >
+                {knowledgeBases.length === 0 ? (
+                  <div className="px-3 py-3 text-xs text-muted-foreground text-center">
+                    暂无知识库
+                  </div>
+                ) : (
+                  knowledgeBases.map((kb) => {
+                    const isActive = activeKnowledgeBaseIds.includes(kb.id);
+                    return (
+                      <button
+                        key={kb.id}
+                        onClick={(e) => {
+                          e.stopPropagation();
+                          onToggleKb(kb.id);
+                        }}
+                        className={`w-full px-3 py-2 flex items-center gap-2.5 text-sm transition-colors
+                          ${isActive ? 'text-emerald-600 dark:text-emerald-400' : 'text-foreground hover:bg-muted/50'}
+                        `}
+                      >
+                        <div className={`w-4 h-4 rounded border flex items-center justify-center flex-shrink-0 transition-colors
+                          ${isActive ? 'bg-emerald-500 border-emerald-500' : 'border-muted-foreground/30'}
+                        `}>
+                          {isActive && <Check size={12} className="text-white" />}
+                        </div>
+                        <BookOpen size={14} className="flex-shrink-0 text-muted-foreground" />
+                        <span className="truncate">{kb.name}</span>
+                      </button>
+                    );
+                  })
+                )}
+              </div>
+            )}
+          </div>
         )}
 
         {/* Context usage indicator */}

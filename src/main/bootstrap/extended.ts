@@ -34,6 +34,8 @@ import { registerGitBashHandlers, initializeGitBashOnStartup } from '../ipc/git-
 import { registerGitHubHandlers } from '../ipc/github';
 import { registerGitCodeHandlers } from '../ipc/gitcode';
 import { cleanupAllCaches } from '../services/file-watcher/artifact-cache.service';
+import { registerKnowledgeBaseHandlers } from '../ipc/knowledge-base';
+import { setKnowledgeBaseService } from '../services/knowledge-base';
 import { markExtendedServicesReady } from './state';
 import { getMainWindow, sendToRenderer } from '../services/window.service';
 import { initializeHealthSystem, setSessionCleanupFn } from '../services/health';
@@ -112,6 +114,9 @@ async function initPlatformAndApps(): Promise<void> {
   // ── Phase 0: Store ──────────────────────────────────────────────────────
   const db = await initStore();
   platformDb = db;
+
+  // Knowledge Base: Wire database connection
+  setKnowledgeBaseService(db);
 
   // ── Phase 1: Platform services (parallel) ───────────────────────────────
   const [scheduler, eventBus, memory, terminalHistory] = await Promise.all([
@@ -218,6 +223,9 @@ export function initializeExtendedServices(): void {
   // Hyper Space: Multi-agent collaboration IPC handlers
   registerHyperSpaceHandlers();
 
+  // Knowledge Base: Personal wiki management
+  registerKnowledgeBaseHandlers();
+
   // Skill: IPC handlers for Skill management
   // Requires only ConversationService
   import('../services/conversation.service')
@@ -261,10 +269,28 @@ export function initializeExtendedServices(): void {
     });
 
   // Platform + Apps: Store, Scheduler, EventBus, Memory, AppManager, AppRuntime
-  // Runs fully asynchronously -- does not block the UI or extended-ready event.
-  initPlatformAndApps().catch((err) => {
-    console.error('[Bootstrap] Platform+Apps initialization failed:', err);
-  });
+  // Must complete before signaling extended-ready to renderer (knowledge base, etc. depend on it).
+  initPlatformAndApps()
+    .then(() => {
+      // Mark state as ready (for Pull-based queries from renderer)
+      markExtendedServicesReady();
+
+      // Notify renderer that extended services are ready (Push-based)
+      sendToRenderer('bootstrap:extended-ready', {
+        timestamp: Date.now(),
+        duration: duration,
+      });
+      console.log('[Bootstrap] Sent bootstrap:extended-ready to renderer');
+    })
+    .catch((err) => {
+      console.error('[Bootstrap] Platform+Apps initialization failed:', err);
+      // Still mark ready so the renderer doesn't hang
+      markExtendedServicesReady();
+      sendToRenderer('bootstrap:extended-ready', {
+        timestamp: Date.now(),
+        duration: duration,
+      });
+    });
 
   // MCP Proxy Server: Exposes built-in MCP tools (aico-bot-apps, gh-search) via HTTP
   // for remote Claude sessions to connect through SSH tunnels.
@@ -282,18 +308,6 @@ export function initializeExtendedServices(): void {
     ? join(homedir(), '.aico-bot-dev', 'app-logs')
     : join(app.getPath('userData'), 'app-logs');
   cleanupOldLogs(logDir).catch(() => {});
-
-  // Mark state as ready (for Pull-based queries from renderer)
-  // This enables renderer to query status on HMR reload or error recovery
-  markExtendedServicesReady();
-
-  // Notify renderer that extended services are ready (Push-based)
-  // This allows renderer to safely call extended service APIs
-  sendToRenderer('bootstrap:extended-ready', {
-    timestamp: Date.now(),
-    duration: duration,
-  });
-  console.log('[Bootstrap] Sent bootstrap:extended-ready to renderer');
 }
 
 /**

@@ -14,3 +14,4 @@ export { registerRemoteServerHandlers } from './remote-server';
 export { registerHyperSpaceHandlers } from './hyper-space';
 export { registerGitHubHandlers } from './github';
 export { registerGitCodeHandlers } from './gitcode';
+export { registerKnowledgeBaseHandlers } from './knowledge-base';

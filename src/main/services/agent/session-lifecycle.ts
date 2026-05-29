@@ -697,34 +697,52 @@ export async function compactContext(
   }
 
   try {
-    console.log(`[Agent][${conversationId}] Manually compacting context...`);
+    console.log(`[Agent][${conversationId}] Manually compacting context via /compact command...`);
 
     const session = sessionInfo.session;
 
-    // Use the SDK's compact method (added via SDK patch)
-    if (typeof session.compact === 'function') {
-      const result = await session.compact();
-      if (result.compacted) {
-        console.log(`[Agent][${conversationId}] Context compacted successfully`, {
-          preCompactTokenCount: result.preCompactTokenCount,
-          postCompactTokenCount: result.postCompactTokenCount,
-        });
-        return { success: true };
-      } else {
-        console.log(`[Agent][${conversationId}] Compact skipped: threshold not met`);
-        return {
-          success: false,
-          error: 'Context is not large enough to compress. The SDK auto-compacts when needed.',
-        };
+    // Send /compact as a user message to the CC subprocess
+    // This mirrors how Claude Code CLI handles the /compact slash command
+    await session.send('/compact');
+    console.log(`[Agent][${conversationId}] /compact command sent, consuming stream...`);
+
+    // We MUST consume the stream after send(), otherwise the SDK's internal
+    // message queue stalls and subsequent messages will hang.
+    // We must consume ALL messages (including assistant text "Compacted" and result)
+    // to prevent them from leaking into the next stream() call and showing as chat bubbles.
+    let compacted = false;
+    try {
+      for await (const sdkMessage of session.stream()) {
+        const msgType = sdkMessage.type;
+        const subtype = sdkMessage.subtype;
+
+        // compact_boundary = CC successfully compressed the context
+        if (msgType === 'system' && subtype === 'compact_boundary') {
+          const meta = (sdkMessage as any).compact_metadata;
+          console.log(
+            `[Agent][${conversationId}] /compact succeeded: trigger=${meta?.trigger}, pre_tokens=${meta?.pre_tokens}`,
+          );
+          compacted = true;
+          // DON'T break — keep consuming to drain remaining messages (text, result)
+        }
+
+        // result message = CC finished processing the command, safe to stop
+        if (msgType === 'result') {
+          console.log(`[Agent][${conversationId}] /compact stream fully consumed`);
+          break;
+        }
       }
-    } else {
-      // Fallback: close and recreate session to clear context
-      console.log(
-        `[Agent][${conversationId}] SDK compact not available, recreating session to clear context`,
-      );
-      cleanupSession(conversationId, 'manual compact');
-      clearSessionHealth(conversationId);
+    } catch (streamErr: any) {
+      console.error(`[Agent][${conversationId}] /compact stream error:`, streamErr.message);
+    }
+
+    if (compacted) {
       return { success: true };
+    } else {
+      return {
+        success: false,
+        error: 'Compact did not complete. The context may not be large enough.',
+      };
     }
   } catch (error) {
     console.error(`[Agent][${conversationId}] Manual compact failed:`, error);

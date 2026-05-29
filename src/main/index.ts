@@ -4,6 +4,14 @@
  */
 
 // ========================================
+// V8 HEAP SIZE (MUST be the very first thing)
+// ========================================
+// Knowledge base extraction processes large documents via LLM, which can exceed
+// the default ~2GB V8 heap limit. Set 4GB before anything else runs.
+import v8 from 'node:v8';
+v8.setFlagsFromString('--max-old-space-size=4096 --expose-gc');
+
+// ========================================
 // LOGGING INITIALIZATION (must be first)
 // ========================================
 // Initialize electron-log before any other code to capture all logs
@@ -110,6 +118,11 @@ if (process.platform === 'win32') {
 // Anti-fingerprinting: Disable automation detection features in Chromium
 // This prevents websites from detecting the app as an automated browser
 app.commandLine.appendSwitch('disable-blink-features', 'AutomationControlled');
+
+// Memory: Increase V8 heap to 4GB and expose GC for manual collection
+// Knowledge base extraction processes large documents via LLM, generating
+// multi-MB response strings that can exhaust the default ~2GB heap
+app.commandLine.appendSwitch('js-flags', '--max-old-space-size=4096 --expose-gc');
 
 // Single instance lock: Prevent multiple instances of the application
 // Must be called before app.whenReady()

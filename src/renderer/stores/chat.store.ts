@@ -142,6 +142,7 @@ interface PendingMessage {
   thinkingEnabled?: boolean;
   aiBrowserEnabled?: boolean;
   agentId?: string; // Target agent ID for Hyper Space
+  activeKnowledgeBases?: string[]; // Active knowledge base IDs
   timestamp: number;
 }
 
@@ -470,6 +471,7 @@ interface ChatState {
     aiBrowserEnabled?: boolean,
     thinkingEnabled?: boolean,
     agentId?: string,
+    activeKnowledgeBases?: string[],
   ) => Promise<void>;
   stopGeneration: (conversationId?: string) => Promise<void>;
 
@@ -883,6 +885,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
           console.error('[ChatStore] Failed to trigger session warm up:', error);
         }
 
+        // Reset knowledge base selection to all enabled KBs for new conversation
+        const { useKnowledgeBaseStore } = await import('./knowledge-base.store');
+        useKnowledgeBaseStore.getState().onConversationCreated(newConversation.id);
+
         return newConversation;
       }
 
@@ -921,6 +927,10 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Reset agent view to main when switching conversations
     set({ activeAgentId: null });
+
+    // Restore per-conversation knowledge base selection
+    const { useKnowledgeBaseStore } = await import('./knowledge-base.store');
+    useKnowledgeBaseStore.getState().onConversationSwitched(conversationId);
 
     // Update the pointer + move unseen/error items to readAt grace period
     set((state) => {
@@ -1323,7 +1333,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // Send message (with optional images for multi-modal, optional AI Browser and thinking mode)
   // Supports queuing: if already generating, adds message to pendingMessages queue
   // agentId: target agent for Hyper Space ('leader' for default, or specific agent ID)
-  sendMessage: async (content, images, aiBrowserEnabled, thinkingEnabled, agentId) => {
+  sendMessage: async (content, images, aiBrowserEnabled, thinkingEnabled, agentId, activeKnowledgeBases) => {
     // Detect skill invocation from message content
     const trimmedContent = content.trim();
     const { installedSkills } = useSkillStore.getState();
@@ -1369,6 +1379,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         thinkingEnabled,
         aiBrowserEnabled,
         agentId, // Store target agent
+        activeKnowledgeBases,
         timestamp: Date.now(),
       };
 
@@ -1524,6 +1535,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               thinkingEnabled,
               canvasContext: buildCanvasContext(),
               agentId: id,
+              activeKnowledgeBases,
             }),
           ),
         );
@@ -1541,6 +1553,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
               thinkingEnabled,
               canvasContext: buildCanvasContext(),
               agentId: id,
+              activeKnowledgeBases,
             }),
           ),
         );
@@ -1554,6 +1567,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
           thinkingEnabled, // Pass thinking mode to API
           canvasContext: buildCanvasContext(), // Pass canvas context for AI awareness
           agentId: agentId || 'leader', // Pass target agent for Hyper Space
+          activeKnowledgeBases, // Pass active knowledge base IDs
         });
       }
 
@@ -2275,6 +2289,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           // next handleAgentComplete reload brings correct ordering.
           // Do NOT add to cache here — that caused off-by-one display bug
           // where the user message appeared under the previous response.
+          // Send with CURRENT KB selection (not stale snapshot)
+          const { useKnowledgeBaseStore } = await import('./knowledge-base.store');
+          const currentKbIds = useKnowledgeBaseStore.getState().activeKnowledgeBaseIds;
           await api.sendMessage({
             spaceId,
             conversationId,
@@ -2283,7 +2300,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
             aiBrowserEnabled: nextMessage.aiBrowserEnabled,
             thinkingEnabled: nextMessage.thinkingEnabled,
             canvasContext: buildCanvasContext(),
-            agentId: nextMessage.agentId || 'leader', // Pass target agent for Hyper Space
+            agentId: nextMessage.agentId || 'leader',
+            activeKnowledgeBases: currentKbIds.length > 0 ? currentKbIds : undefined,
           });
         }
       }

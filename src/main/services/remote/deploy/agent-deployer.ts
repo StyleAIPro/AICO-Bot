@@ -360,6 +360,15 @@ export async function updateAgentCode(service: RemoteDeployService, id: string):
   );
   service.emitCommandOutput(id, 'success', '✓ 部署包已上传并解压');
 
+  // Run patch-sdk.mjs to fix ripgrep permissions and apply SDK patches.
+  // This must run on every deploy (not just when npm install runs),
+  // because fast updates skip npm install/postinstall.
+  service.emitCommandOutput(id, 'output', '正在执行 SDK 补丁脚本...');
+  await manager.executeCommand(
+    `cd ${deployPath} && ${npmPathPrefix}node scripts/patch-sdk.mjs 2>&1 || true`,
+    { timeoutMs: 30_000 },
+  );
+
   // Clean up local temp package
   try {
     fs.unlinkSync(packagePath);
@@ -754,6 +763,12 @@ export async function deployAgentCodeOffline(service: RemoteDeployService, id: s
     } else {
       service.emitDeployProgress(id, 'extract', '版本一致，跳过解压', 35);
     }
+
+    // Fix ripgrep binary permissions (always run, even when skipping upload/extract)
+    // npm packages ship rg without execute bit; without this the Grep tool fails with EACCES.
+    await manager.executeCommand(
+      `chmod +x ${deployPath}/node_modules/@anthropic-ai/claude-agent-sdk/vendor/ripgrep/*/rg 2>/dev/null || true`,
+    );
 
     // Step 4: Configure environment (bundled Node.js + SDK symlink)
     service.emitDeployProgress(id, 'env', '正在配置运行环境...', 50);
