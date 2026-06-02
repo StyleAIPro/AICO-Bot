@@ -137,6 +137,16 @@ const KB_MIGRATIONS = [
       }
     },
   },
+  {
+    version: 5,
+    description: 'Add reflux_error to kb_sources',
+    up(db: Database.Database): void {
+      const cols = (db.prepare("PRAGMA table_info(kb_sources)").all() as Array<{ name: string }>).map((c) => c.name);
+      if (!cols.includes('reflux_error')) {
+        db.exec("ALTER TABLE kb_sources ADD COLUMN reflux_error TEXT NOT NULL DEFAULT ''");
+      }
+    },
+  },
 ];
 
 // ---------------------------------------------------------------------------
@@ -957,7 +967,7 @@ export class KnowledgeBaseService {
           const status = task.status.toUpperCase();
           if (status === 'SUCCESS') {
             const now = this.now();
-            this.db.prepare("UPDATE kb_sources SET reflux_status = 'success', refluxed_at = ?, reflux_task_id = NULL WHERE id = ?")
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'success', refluxed_at = ?, reflux_error = '', reflux_task_id = NULL WHERE id = ?")
               .run(now, source.id);
             const rawPath = path.join(this.getKbPath(kbId), 'raw', source.stored_name);
             const md5 = fs.existsSync(rawPath) ? this.computeMd5(rawPath) : null;
@@ -965,7 +975,8 @@ export class KnowledgeBaseService {
               .run(kbId, source.stored_name, now, md5);
             updated++;
           } else if (status === 'FAILED' || status === 'CANCELLED') {
-            this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed', reflux_task_id = NULL WHERE id = ?").run(source.id);
+            const errMsg = task.errorMessage ?? `${status.toLowerCase()} by server`;
+            this.db.prepare("UPDATE kb_sources SET reflux_status = 'failed', reflux_error = ?, reflux_task_id = NULL WHERE id = ?").run(errMsg, source.id);
             updated++;
           } else {
             stillProcessing++;
@@ -1333,6 +1344,7 @@ export class KnowledgeBaseService {
       createdAt: row.created_at as string,
       refluxStatus: (row.reflux_status as string) ?? 'pending',
       refluxedAt: (row.refluxed_at as string) ?? null,
+      refluxError: (row.reflux_error as string) ?? '',
       fileChanged: false,
     };
   }

@@ -1,4 +1,4 @@
-import React, { useCallback, forwardRef, useEffect, useMemo, useRef, useState } from 'react';
+import React, { useCallback, forwardRef, useEffect, useRef, useState } from 'react';
 import { useTranslation } from 'react-i18next';
 import {
   BookOpen,
@@ -202,14 +202,7 @@ export function KnowledgePage() {
   } = useKnowledgeBaseStore();
 
   const refluxProgress = useKnowledgeBaseStore((s) => s.refluxProgress);
-  const refluxBatchTotal = useKnowledgeBaseStore((s) => s.refluxBatchTotal);
-
-  const refluxPollingInfo = useMemo(() => {
-    const processing = sources.filter((s) => s.refluxStatus === 'processing').length;
-    if (processing === 0 || refluxBatchTotal === 0) return null;
-    const done = refluxBatchTotal - processing;
-    return { processing, total: refluxBatchTotal, done };
-  }, [sources, refluxBatchTotal]);
+  const refluxDoneResult = useKnowledgeBaseStore((s) => s.refluxDoneResult);
 
   const [queryInput, setQueryInput] = useState('');
   const [lintResult, setLintResult] = useState<{ issues: Array<{ type: string; severity: string; file: string; detail: string; relatedFile?: string }>; totalPages: number; healthScore: number } | null>(null);
@@ -548,23 +541,6 @@ export function KnowledgePage() {
             >
               {t('kb.cancelIngest')}
             </button>
-          </div>
-        </div>
-      )}
-
-      {refluxPollingInfo && (
-        <div className="mx-6 mt-3 px-4 py-3 rounded-lg border border-blue-500/30 bg-blue-500/5 flex-shrink-0">
-          <div className="flex items-center justify-between mb-2">
-            <div className="flex items-center gap-2 text-sm">
-              <Loader2 className="w-4 h-4 animate-spin text-blue-500" />
-              <span className="text-blue-500">{t('kb.refluxStatus.processing')} {refluxPollingInfo.done}/{refluxPollingInfo.total}</span>
-            </div>
-          </div>
-          <div className="h-1.5 bg-secondary rounded-full overflow-hidden">
-            <div
-              className="h-full bg-blue-500 rounded-full transition-all duration-300"
-              style={{ width: `${(refluxPollingInfo.done / refluxPollingInfo.total) * 100}%` }}
-            />
           </div>
         </div>
       )}
@@ -1628,6 +1604,46 @@ export function KnowledgePage() {
                 </button>
               </div>
             )}
+          </div>
+        </div>
+      )}
+
+      {/* Reflux Done Result Modal */}
+      {refluxDoneResult && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/50" onClick={() => useKnowledgeBaseStore.setState({ refluxDoneResult: null })}>
+          <div className="bg-background border rounded-lg shadow-lg w-[420px] flex flex-col" onClick={(e) => e.stopPropagation()}>
+            <div className="px-4 py-3 border-b">
+              <h3 className="text-sm font-medium">{t('kb.refluxResult.title')}</h3>
+            </div>
+            <div className="flex-1 overflow-y-auto p-4 space-y-4">
+              <div className="flex items-center gap-4 text-sm">
+                <span className="text-green-500">{t('kb.refluxResult.success', { count: refluxDoneResult.success })}</span>
+                {refluxDoneResult.failed > 0 && (
+                  <span className="text-red-500">{t('kb.refluxResult.failed', { count: refluxDoneResult.failed })}</span>
+                )}
+              </div>
+              {refluxDoneResult.errors.length > 0 && (
+                <div className="space-y-1.5">
+                  <div className="text-xs text-muted-foreground">{t('kb.refluxResult.errorDetail')}</div>
+                  <div className="max-h-48 overflow-y-auto space-y-1">
+                    {refluxDoneResult.errors.map((err, i) => (
+                      <div key={i} className="text-xs bg-red-50 dark:bg-red-900/20 text-red-600 dark:text-red-400 rounded px-3 py-2">
+                        <span className="font-medium">{err.fileName}</span>
+                        <span className="text-muted-foreground ml-1">{err.error}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+              )}
+            </div>
+            <div className="px-4 py-3 border-t flex justify-end">
+              <button
+                onClick={() => useKnowledgeBaseStore.setState({ refluxDoneResult: null })}
+                className="px-3 py-1.5 text-xs bg-primary text-primary-foreground rounded hover:bg-primary/90 transition-colors"
+              >
+                {t('kb.close')}
+              </button>
+            </div>
           </div>
         </div>
       )}

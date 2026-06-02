@@ -32,6 +32,7 @@ export interface KbSource {
   createdAt: string;
   refluxStatus?: string;
   refluxedAt?: string | null;
+  refluxError?: string;
   fileChanged?: boolean;
   wasRefluxed?: boolean;
 }
