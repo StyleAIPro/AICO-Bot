@@ -50,6 +50,8 @@ interface KnowledgeBaseState {
   ingestProgress: { current: number; total: number; fileName: string } | null;
   refluxProgress: { current: number; total: number; fileName: string } | null;
   refluxBatchTotal: number;
+  refluxBatchSourceIds: Set<string>;
+  refluxDoneResult: { success: number; failed: number; errors: Array<{ fileName: string; error: string }> } | null;
   refluxPollingTimer: ReturnType<typeof setTimeout> | null;
   ingestingKbId: string | null;
   wikiUpdatedCounter: number;
@@ -96,6 +98,8 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   ingestProgress: null,
   refluxProgress: null,
   refluxBatchTotal: 0,
+  refluxBatchSourceIds: new Set<string>(),
+  refluxDoneResult: null,
   refluxPollingTimer: null,
   ingestingKbId: null,
   wikiUpdatedCounter: 0,
@@ -249,7 +253,7 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
   },
 
   refluxSources: async (kbId: string, sourceIds: string[], userAccount: string) => {
-    set({ loadingAction: 'reflux', loading: true, error: null, refluxProgress: null });
+    set({ loadingAction: 'reflux', loading: true, error: null, refluxProgress: null, refluxDoneResult: null, refluxBatchSourceIds: new Set(sourceIds) });
     try {
       const res = await kbApi.kbRefluxSources(kbId, sourceIds, userAccount);
       if (res.success) {
@@ -288,11 +292,42 @@ export const useKnowledgeBaseStore = create<KnowledgeBaseState>()((set, get) => 
         const res = await kbApi.kbPollRefluxStatus(kbId);
         if (res.success && res.data) {
           const { stillProcessing } = res.data as { updated: number; stillProcessing: number };
-          await get().loadSources(kbId);
+          if (get().currentKb?.id === kbId) {
+            await get().loadSources(kbId);
+          }
           if (stillProcessing > 0) {
             get().startRefluxPolling(kbId);
           } else {
-            set({ refluxPollingTimer: null });
+            const state = get();
+            const batchIds = state.refluxBatchSourceIds;
+            let batchSources = state.sources.filter(
+              (s) => batchIds.has(s.id) && (s.refluxStatus === 'success' || s.refluxStatus === 'failed'),
+            );
+            if (batchSources.length === 0 && batchIds.size > 0) {
+              const srcRes = await kbApi.kbListSources(kbId);
+              if (srcRes.success) {
+                batchSources = (srcRes.data as KbSource[]).filter(
+                  (s) => batchIds.has(s.id) && (s.refluxStatus === 'success' || s.refluxStatus === 'failed'),
+                );
+              }
+            }
+            const successCount = batchSources.filter((s) => s.refluxStatus === 'success').length;
+            const failedItems = batchSources
+              .filter((s) => s.refluxStatus === 'failed')
+              .map((s) => ({ fileName: s.storedName, error: s.refluxError || 'Unknown error' }));
+            set({
+              refluxPollingTimer: null,
+              refluxBatchTotal: 0,
+              refluxBatchSourceIds: new Set(),
+              refluxDoneResult: {
+                success: successCount,
+                failed: failedItems.length,
+                errors: failedItems,
+              },
+            });
+            if (state.currentKb?.id === kbId) {
+              await get().loadSources(kbId);
+            }
           }
         } else {
           get().startRefluxPolling(kbId);
