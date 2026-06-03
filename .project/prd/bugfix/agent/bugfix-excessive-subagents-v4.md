@@ -2,7 +2,7 @@
 
 > 版本：bugfix-excessive-subagents-v4
 > 日期：2026-04-27
-> 状态：in-progress
+> 状态：done
 > 指令人：@misakamikoto
 > 归属模块：modules/agent
 > 严重程度：Critical
@@ -279,10 +279,11 @@ if (options.usesAIBrowser) {
 
 | 文件 | 变更类型 | 变更描述 |
 |------|----------|----------|
-| `src/main/services/agent/send-message.ts` | 修改 | `buildBaseSdkOptions` 调用添加 `additionalDisallowedTools: ['Agent', 'Task']` |
+| `src/main/services/agent/send-message-local.ts` | 修改 | 两处 `buildBaseSdkOptions` 调用添加 `additionalDisallowedTools: ['Agent', 'Task']` |
+| `src/main/services/agent/session-lifecycle.ts` | 修改 | `buildBaseSdkOptions` 调用添加 `additionalDisallowedTools: ['Agent', 'Task']` |
 | `src/main/services/agent/system-prompt.ts` | 修改 | 移除 Task/Agent 鼓励语句（174-175、180-188 行），扩展禁令范围（179 行） |
 | `src/main/apps/runtime/prompt.ts` | 修改 | 删除 `SUB_AGENT_INSTRUCTIONS` 常量（87-102 行）及其使用（165-168 行） |
-| `packages/remote-agent-proxy/src/claude-manager.ts` | 修改 | 两处 `disallowedTools` 添加 `Agent`/`Task`（925、2936 行），扩展 fallback 提示词禁令（448 行） |
+| `packages/remote-agent-proxy/src/claude-manager.ts` | 修改 | 移除 `userRequestedSubAgent` regex 自动放行，提示词禁令扩展为全面禁止，`canUseTool` 仅保留 skill 级放行 |
 
 ## 验收标准
 

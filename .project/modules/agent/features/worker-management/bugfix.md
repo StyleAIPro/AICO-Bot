@@ -8,6 +8,8 @@
 | Major | 0 |
 | Minor | 0 |
 
+
+
 ## 已修复
 
 ### BUG-001：mailbox writeMailboxFileAtomic 非原子写入 + 并发数据丢失
@@ -97,3 +99,35 @@
 - **文件**：`src/main/services/agent/orchestrator.ts`, `src/renderer/stores/chat.store.ts`
 - **问题**：Leader 等待 Worker 执行期间不发送前端事件，30 秒不活跃计时器触发后调用 `stopGeneration()` 杀掉 Leader 会话，导致 Worker 掉线。根因：本地 session 无心跳机制 + `handleAgentMessage` worker 路径不更新 `lastActivityAt`。
 - **修复**：orchestrator 在 `executeAgentLocally` while 循环期间每 10 秒发送 `agent:stream-alive` 心跳；`handleAgentMessage` worker 路径更新父 session 的 `lastActivityAt`。
+
+### BUG-012：Leader 因 activeSessions key 不匹配 + onComplete 过早注销被 idle 清理杀死
+
+- **修复日期**：2026-05-29
+- **严重程度**：Critical
+- **文件**：`src/main/services/agent/orchestrator.ts`
+- **问题**：双重根因。(A) `executeAgentLocally` 用 childConversationId 存 V2 session，却用 parent conversationId 注册 `activeSessions`，`invalidateAllSessions` 的在途保护失效。(B) `onComplete` 在每轮 `processStream` 结束时注销 `activeSessions`，但 orchestrator while 循环可能还在 `waitForCompletion` 中等 worker（30+ 分钟），此时 `activeSessions` 为空 → session-health 的 30 分钟 idle cleanup 命中 → `cleanupSession` → SDK `close()` 5 秒后 `abort()`。与 BUG-011（前端计时器）是不同根因路径。
+- **修复**：(A) 追加 `registerActiveSession(childConversationId, sessionState)` 双 key 注册。(B) 将 `unregisterActiveSession` 从 `onComplete` 移到 while 循环的 `finally` 块，确保整个生命周期（含 `waitForCompletion`）期间 activeSessions 始终有效。
+
+### BUG-013：processStreamTimeout 定时器泄漏导致 Leader 等待 Worker 时 30 分钟被 SDK abort
+
+- **修复日期**：2026-05-29
+- **严重程度**：Critical
+- **文件**：`src/main/services/agent/orchestrator.ts`
+- **问题**：`executeAgentLocally` 的 `Promise.race` 中 `processStreamTimeout`（30 分钟）的 `setTimeout` 返回值未保存。当 `processStream` 正常返回（Leader turn 结束）后进入 `waitForCompletion` 等待 Worker 时，该定时器仍在事件循环中泄漏。约 30 分钟后定时器触发，产生未处理的 promise rejection，且可能通过 `abortController` 链路导致 SDK 子进程被杀（"Claude Code process aborted by user"）。
+- **修复**：保存 `setTimeout` 返回值到 `psTimeoutId`，`processStream` 正常返回后立即 `clearTimeout`，超时路径也清除。
+
+### BUG-014：Worker 任务完成后残留进度心跳导致 Leader 回复无关内容
+
+- **修复日期**：2026-05-30
+- **严重程度**：Major
+- **文件**：`src/main/services/agent/orchestrator.ts`
+- **问题**：本地/远程 Worker 的 `progressReportInterval`（60s）在 `finally` 块中清除，但任务在 `processStream` 返回时就已完成。最后 60 秒窗口内的 interval tick 可能在任务完成后仍注入"进度心跳"消息到 Leader 队列，导致 Leader LLM 回复"残留心跳，忽略"等无关内容。
+- **修复**：在本地 Worker（L2301-2304）和远程 Worker（L2691-2693）任务完成后立即 `clearInterval(progressReportInterval)`，不再等 `finally` 块。
+
+### BUG-015：Worker 新旧任务混在同一个思考过程框和对话框中
+
+- **修复日期**：2026-05-30
+- **严重程度**：Major
+- **文件**：`src/renderer/stores/chat.store.ts`
+- **问题**：`handleWorkerStarted` 保留旧任务的 `thoughts` 和 `streamingContent`（为处理 IPC 时序问题），但同一 Worker 执行新任务时（taskId 不同），旧状态未被清空，导致新任务的思考过程和输出混入旧任务面板。`handleWorkerCompleted` 使用 `...ws` spread 保留所有旧字段包括 `streamingContent`。
+- **修复**：(A) `handleWorkerStarted` 新增 `isNewTask` 判断（比较 `existing.taskId !== taskId`），新任务时清空 `thoughts`、`streamingContent`、`textBlockVersion`。(B) `handleWorkerCompleted` 显式将 `streamingContent` 设为空字符串。

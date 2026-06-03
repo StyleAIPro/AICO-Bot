@@ -2,6 +2,8 @@
 
 | 日期 | 内容 | 指令人 | 触发来源 |
 |------|------|--------|---------|
+| 2026-06-01 | BUG：`handleAgentComplete` 中 `nextPendingMessage` 未定义导致 ReferenceError，对话重新加载失败，模型输出不显示在 UI。修复：使用 `pendingMessages[0]` 替代未定义变量 — `src/renderer/stores/chat.store.ts` — PRD: `prd/bugfix/bugfix-next-pending-message-undefined-v1.md` | @misakamikoto | bugfix-next-pending-message-undefined-v1 |
+| 2026-06-01 | BUG-007：sdk-config.ts strip 正则 `/\/v\/?messages$/` 改为 `/\/v\d*\/?messages$/`，修复 URL 含 `/v1/messages` 时产生 `/v1/v1/messages` 双重路径 — `src/main/services/agent/sdk-config.ts` — PRD: `prd/bugfix/agent/bugfix-v1-messages-strip-regex-v1.md` | @mi-saka | bugfix-v1-messages-strip-regex-v1 |
 | 2026-05-25 | BUG-001：远程模式 catch 块补充 `agent:error` 事件发送（非 abort 错误在 `agent:complete` 前发送 `agent:error`，使用 `classifyError` 分类错误类型） — `src/main/services/agent/send-message-remote.ts` — PRD: `prd/bugfix/agent/bugfix-agent-error-log-truncation-v1.md` | @misakamikoto | bugfix-agent-error-log-truncation-v1 |
 |------|------|--------|---------|
 | 2026-05-13 | BUG-006：修复注入循环不保存用户消息导致回复错位——injection continuation 循环添加 addMessage 调用，持久化注入的 user 消息和 assistant placeholder，防止 updateLastMessage 覆盖上一个回复 — `src/main/services/agent/send-message-local.ts` | 用户 | bugfix-message-delivery-v1 |

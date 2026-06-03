@@ -117,6 +117,8 @@ export interface BaseSdkOptionsParams {
   agentName?: string;
   /** Additional tools to disallow (merged with the default disallowedTools list) */
   additionalDisallowedTools?: string[];
+  /** Whether to allow Agent/Task tool usage (only for Hyper Space Worker context) */
+  allowSubagents?: boolean;
   /** Permission trust mode: true = full permissions (skip destructive checks) */
   trustMode?: boolean;
   /** GitHub search environment status for dynamic system prompt */
@@ -161,8 +163,8 @@ export async function resolveCredentialsForSdk(
     // Direct path (PROXY_ANTHROPIC = false)
     // SDK appends /v1/messages to base URL — strip if user included it
     const cleanBase = (credentials.baseUrl || '').replace(/\/+$/, '')
-      .replace(/\/v\/?messages$/, '')
-      .replace(/\/v\/?message$/, '')
+      .replace(/\/v\d*\/?messages$/, '')
+      .replace(/\/v\d*\/?message$/, '')
       .replace(/\/messages$/, '')
       .replace(/\/message$/, '');
     return {
@@ -242,8 +244,8 @@ async function resolveAnthropicPassthrough(
   // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
   // Strip these suffixes if user included them to avoid duplication.
   const cleanUrl = baseUrl.replace(/\/+$/, '')
-    .replace(/\/v\/?messages$/, '')
-    .replace(/\/v\/?message$/, '')
+    .replace(/\/v\d*\/?messages$/, '')
+    .replace(/\/v\d*\/?message$/, '')
     .replace(/\/messages$/, '')
     .replace(/\/message$/, '');
   const configUrl = cleanUrl + '/v1/messages';
@@ -750,6 +752,7 @@ export function buildBaseSdkOptions(params: BaseSdkOptionsParams): Record<string
       agentId,
       agentName,
       trustMode,
+      allowSubagents: params.allowSubagents,
     }),
     // Requires SDK patch: enable token-level streaming (stream_event)
     includePartialMessages: true,
