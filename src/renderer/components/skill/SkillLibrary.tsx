@@ -392,8 +392,8 @@ export function SkillLibrary() {
       try {
         console.log('[SkillImport] handleImportFromZip: opening dialog...');
         const filePaths = await window.aicoBot.showOpenDialog({
-          title: t('Select ZIP file'),
-          filters: [{ name: 'ZIP', extensions: ['zip'] }],
+          title: t('Select Archive File'),
+          filters: [{ name: 'Archive', extensions: ['zip', 'tar.gz', 'tgz', 'tar.bz2', 'tar.xz'] }],
           properties: ['openFile'],
         });
 
@@ -401,10 +401,10 @@ export function SkillLibrary() {
         if (!filePaths || filePaths.length === 0) return;
 
         const filePath = filePaths[0];
-        console.log('[SkillImport] calling skillImportSkills with sourceType=zip, filePath=', filePath);
+        console.log('[SkillImport] calling skillImportSkills with sourceType=archive, filePath=', filePath);
         setImporting(true);
         const result = await window.aicoBot.skillImportSkills({
-          sourceType: 'zip',
+          sourceType: 'archive',
           filePath,
         });
 
@@ -488,7 +488,7 @@ export function SkillLibrary() {
     setImporting(true);
     try {
       console.log('[SkillImport] handleZipFileChange: uploading file=', file.name, 'size=', file.size);
-      const result = await api.skillImportFromZip(file);
+      const result = await api.skillImportFromArchive(file);
 
       console.log('[SkillImport] HTTP result:', JSON.stringify(result));
       if (result?.success && result.data) {
@@ -650,7 +650,7 @@ export function SkillLibrary() {
                         className="flex items-center gap-2 w-full px-3 py-1.5 text-xs text-popover-foreground hover:bg-accent text-left"
                       >
                         <PackagePlus className="w-3 h-3" />
-                        {t('From ZIP File')}
+                        {t('From Archive File')}
                       </button>
                       {isElectron() && (
                         <button
@@ -952,11 +952,11 @@ export function SkillLibrary() {
         </div>
       </div>
 
-      {/* Hidden file input for Web mode ZIP import */}
+      {/* Hidden file input for Web mode archive import */}
       <input
         ref={zipInputRef}
         type="file"
-        accept=".zip"
+        accept=".zip,.tar.gz,.tgz,.tar.bz2,.tar.xz"
         className="hidden"
         onChange={handleZipFileChange}
       />

@@ -73,7 +73,7 @@ export function registerSkillHandlers(conversationService: ConversationService):
   // ── skill:import-skills ────────────────────────────────────────────────
   wrapIpcHandle(
     'skill:import-skills',
-    async (event, input: { sourceType: 'zip' | 'folder'; filePath: string }) => {
+    async (event, input: { sourceType: 'archive' | 'folder'; filePath: string }) => {
       console.log('[IPC:skill:import-skills] received:', JSON.stringify(input));
       const onOutput = (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => {
         console.log('[IPC:skill:import-skills] onOutput:', data.type, data.content);
