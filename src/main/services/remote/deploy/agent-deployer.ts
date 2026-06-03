@@ -88,7 +88,7 @@ export async function createDeployPackage(
   }
 
   // Determine which subdirectories to include alongside package.json and dist/
-  const includes: string[] = ['package.json', 'dist'];
+  const includes: string[] = ['package.json', 'dist', 'preflight.cjs'];
   if (fs.existsSync(path.join(packageDir, 'patches'))) {
     includes.push('patches');
   }
@@ -1028,7 +1028,7 @@ async function startAgentOffline(service: RemoteDeployService, id: string, deplo
     .filter(Boolean)
     .join(' ');
 
-  const startCommand = `nohup env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY ${envVars} ${bundledNodePath} ${deployPath}/dist/index.js > ${deployPath}/logs/output.log 2>&1 &`;
+  const startCommand = `nohup env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY ${envVars} ${bundledNodePath} ${deployPath}/preflight.cjs > ${deployPath}/logs/output.log 2>&1 &`;
   await manager.executeCommand(startCommand);
 
   // Wait for startup
