@@ -171,6 +171,8 @@ interface SessionState {
     cacheCreationTokens: number;
     contextWindow: number;
   } | null;
+  // Track whether currentContextUsage comes from API or local estimation
+  contextUsageSource: 'api' | 'estimate' | null;
   // Text block version - increments on each new text block (for StreamingBubble reset)
   textBlockVersion: number;
   // Pending question from AskUserQuestion tool
@@ -377,6 +379,7 @@ function createEmptySessionState(): SessionState {
     idleTimeout: null,
     compactInfo: null,
     currentContextUsage: null,
+    contextUsageSource: null,
     textBlockVersion: 0,
     pendingQuestion: null,
     pendingToolPermission: null,
@@ -1452,7 +1455,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: null,
           errorType: null,
           compactInfo: null,
-          currentContextUsage: null,
+          // Preserve previous context usage until new estimate arrives — prevents "--/200K" flash
+          currentContextUsage: existingSession?.currentContextUsage ?? null,
+          contextUsageSource: existingSession?.contextUsageSource ?? null,
           textBlockVersion: 0,
           pendingQuestion: null,
           pendingToolPermission: null,
@@ -2117,6 +2122,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
             cacheCreationTokens: tokenUsage.cacheCreationTokens,
             contextWindow: newContextWindow,
           },
+          contextUsageSource: 'api',
+        });
+        return { sessions: newSessions };
+      });
+    } else {
+      // No API token data: preserve local estimate as contextUsageSource
+      // The currentContextUsage was already updated by handleAgentContextUsage
+      // with isEstimate events during streaming. Just ensure the source is 'estimate'.
+      set((state) => {
+        const newSessions = new Map(state.sessions);
+        const session = newSessions.get(conversationId);
+        if (!session) return state;
+        // Keep existing estimate value, only ensure source is marked
+        if (session.contextUsageSource === 'api') return state;
+        newSessions.set(conversationId, {
+          ...session,
+          contextUsageSource: session.currentContextUsage ? 'estimate' : null,
         });
         return { sessions: newSessions };
       });
@@ -2238,7 +2260,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 streamingContent: '',
                 thoughts: [],
                 compactInfo: null,
-                currentContextUsage: null,
+                // Preserve context usage during consecutive generation
+                currentContextUsage: currentSession.currentContextUsage,
+                contextUsageSource: currentSession.contextUsageSource,
                 pendingQuestion: null,
                 pendingToolPermission: null,
                 error: null,
@@ -2281,9 +2305,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.log(`[ChatStore] Conversation reloaded from backend [${conversationId}]`);
 
         // If there were pending messages, send the first one now
-        // Use nextPendingMessage captured from inside set() (current state, not stale snapshot)
-        if (nextPendingMessage) {
-          // Build canvas context (uses module-level buildCanvasContext)
+        if (pendingMessages.length > 0) {
+          const nextPendingMessage = pendingMessages[0];
 
           // Send the pending message — backend addMessage() writes to DB,
           // next handleAgentComplete reload brings correct ordering.
@@ -2295,12 +2318,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           await api.sendMessage({
             spaceId,
             conversationId,
-            message: nextMessage.content,
-            images: nextMessage.images,
-            aiBrowserEnabled: nextMessage.aiBrowserEnabled,
-            thinkingEnabled: nextMessage.thinkingEnabled,
+            message: nextPendingMessage.content,
+            images: nextPendingMessage.images,
+            aiBrowserEnabled: nextPendingMessage.aiBrowserEnabled,
+            thinkingEnabled: nextPendingMessage.thinkingEnabled,
             canvasContext: buildCanvasContext(),
-            agentId: nextMessage.agentId || 'leader',
+            agentId: nextPendingMessage.agentId || 'leader',
             activeKnowledgeBases: currentKbIds.length > 0 ? currentKbIds : undefined,
           });
         }
@@ -2321,7 +2344,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             streamingContent: '',
             thoughts: [], // Clear thoughts
             compactInfo: null, // Clear temporary compact notification
-            currentContextUsage: null,
+            // Preserve context usage on error so user can still see accumulated context
+            currentContextUsage: currentSession.currentContextUsage,
+            contextUsageSource: currentSession.contextUsageSource,
             pendingQuestion: null, // Clear pending question
             pendingToolPermission: null, // Clear pending tool permission
             pendingMessages: [], // Clear pending messages on error
@@ -2611,24 +2636,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
       cacheReadTokens,
       cacheCreationTokens,
       contextWindow: passedContextWindow,
-    } = data;
+      isEstimate,
+      estimatedTokens,
+    } = data as typeof data & { isEstimate?: boolean; estimatedTokens?: number };
 
     set((state) => {
       const newSessions = new Map(state.sessions);
       const session = newSessions.get(conversationId);
       if (!session) return state;
 
-      newSessions.set(conversationId, {
-        ...session,
-        currentContextUsage: {
+      const updates: Partial<SessionState> = {
+        lastActivityAt: Date.now(),
+      };
+
+      if (isEstimate) {
+        // Local estimation: only update currentContextUsage if no API value present
+        if (session.contextUsageSource !== 'api') {
+          updates.currentContextUsage = {
+            inputTokens: estimatedTokens ?? inputTokens,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            contextWindow: passedContextWindow ?? session.currentContextUsage?.contextWindow ?? 200000,
+          };
+          updates.contextUsageSource = 'estimate';
+        }
+      } else {
+        // API precise value: always override
+        updates.currentContextUsage = {
           inputTokens,
           outputTokens,
           cacheReadTokens,
           cacheCreationTokens,
           contextWindow: passedContextWindow ?? session.currentContextUsage?.contextWindow ?? 200000,
-        },
-        lastActivityAt: Date.now(),
-      });
+        };
+        updates.contextUsageSource = 'api';
+      }
+
+      newSessions.set(conversationId, { ...session, ...updates });
       return { sessions: newSessions };
     });
   },
@@ -2919,6 +2964,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Reuse existing worker session if same agent is still active (update task)
       // Also preserves content from temporary sessions created by early agent:message events
       const existing = newWorkerSessions.get(agentId);
+      // Detect whether this is a NEW task for the same worker (different taskId)
+      // vs an IPC timing re-order where worker:started arrives after early thoughts.
+      // Only reset state when the taskId actually changes — preserving thoughts for
+      // the IPC race condition where thought events arrive before worker:started.
+      const isNewTask = !!(existing?.taskId && taskId && existing.taskId !== taskId);
       // Build child conversation ID for loading persisted message history
       const childConvId = `${parentConvId}:agent-${agentId}`;
       const isTemporarySession = existing && !existing.childConversationId;
@@ -2929,14 +2979,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         task: task || '',
         isRunning: true,
         status: 'running',
-        streamingContent: existing?.streamingContent || '',
+        streamingContent: isNewTask ? '' : (existing?.streamingContent || ''),
         isStreaming: false,
-        // Always preserve existing thoughts — IPC ordering means thoughts can
-        // arrive before worker:started, and createTemporaryWorkerSession now sets
-        // childConversationId (making isTemporarySession always false for that path)
-        thoughts: existing?.thoughts || [],
+        // Preserve existing thoughts for IPC race condition, but clear when
+        // the same worker starts a genuinely new task (different taskId).
+        thoughts: isNewTask ? [] : (existing?.thoughts || []),
         isThinking: false,
-        textBlockVersion: 0,
+        textBlockVersion: isNewTask ? 0 : (existing?.textBlockVersion || 0),
         error: null,
         completedAt: null,
         type: type || existing?.type || 'local',
@@ -3010,6 +3059,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: error || null,
         isStreaming: false,
         isThinking: false,
+        streamingContent: '',  // Clear streamed content on completion
         completedAt: Date.now(),
         // Cancel pending question if still active when worker completes
         pendingQuestion:

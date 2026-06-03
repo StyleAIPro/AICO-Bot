@@ -71,6 +71,19 @@ export function registerConversationHandlers(): void {
   wrapIpcHandle('conversation:delete', async (_event, spaceId: string, conversationId: string) => {
     try {
       const result = deleteConversation(spaceId, conversationId);
+
+      // Interrupt HyperSpace workers and destroy the team if this is a HyperSpace conversation
+      try {
+        const { agentOrchestrator } = require('../services/agent/orchestrator');
+        await agentOrchestrator.interruptWorkersForConversation(conversationId);
+        const team = agentOrchestrator.getTeamBySpace(spaceId);
+        if (team && team.conversationId === conversationId) {
+          await agentOrchestrator.destroyTeam(team.id);
+        }
+      } catch (_) {
+        // Not a HyperSpace conversation — ignore
+      }
+
       return { success: true, data: result };
     } catch (error: unknown) {
       const err = error as Error;
