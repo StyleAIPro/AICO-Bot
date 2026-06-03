@@ -122,6 +122,15 @@ function createSpawnSubagentTool(spaceId: string, conversationId: string) {
         // Start execution in background
         agentOrchestrator.executeAllTasks(team.id).catch((err) => {
           console.error(`[HyperSpaceMcp] Task execution error:`, err);
+          // Notify the leader about the execution failure via injection
+          const errorMsg = err instanceof Error ? err.message : String(err);
+          agentOrchestrator.injectMessageToSession(
+            spaceId,
+            conversationId,
+            `[Subagent Error] Task ${task.id} (agent: ${agentName}) failed to start:\n${errorMsg}`,
+          ).catch((injectErr) => {
+            console.error(`[HyperSpaceMcp] Failed to notify leader of error:`, injectErr);
+          });
         });
 
         return textResult(
