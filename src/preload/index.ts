@@ -612,7 +612,7 @@ export interface AicoBotAPI {
     skillId?: string;
     yamlContent?: string;
   }) => Promise<IpcResponse>;
-  skillImportSkills: (input: { sourceType: 'zip' | 'folder'; filePath: string }) => Promise<IpcResponse>;
+  skillImportSkills: (input: { sourceType: 'archive' | 'folder'; filePath: string }) => Promise<IpcResponse>;
   skillFiles: (skillId: string) => Promise<IpcResponse>;
   skillFileContent: (skillId: string, filePath: string) => Promise<IpcResponse>;
   skillFileSave: (skillId: string, filePath: string, content: string) => Promise<IpcResponse>;
