@@ -129,6 +129,7 @@ export function ChatView({ isCompact = false }: ChatViewProps) {
     isThinking,
     compactInfo,
     currentContextUsage,
+    contextUsageSource,
     error,
     errorType,
     textBlockVersion,
@@ -432,6 +433,7 @@ export function ChatView({ isCompact = false }: ChatViewProps) {
         spaceId={currentSpace?.id}
         conversationId={currentConversation?.id}
         contextUsage={currentContextUsage}
+        contextUsageSource={contextUsageSource}
       />
     </div>
   );

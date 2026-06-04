@@ -171,6 +171,8 @@ interface SessionState {
     cacheCreationTokens: number;
     contextWindow: number;
   } | null;
+  // Track whether currentContextUsage comes from API or local estimation
+  contextUsageSource: 'api' | 'estimate' | null;
   // Text block version - increments on each new text block (for StreamingBubble reset)
   textBlockVersion: number;
   // Pending question from AskUserQuestion tool
@@ -183,6 +185,8 @@ interface SessionState {
   workerSessions: Map<string, WorkerSessionState>;
   // Inactivity detection: last time a backend event was received
   lastActivityAt: number | null;
+  // Worker context captured when Leader stream is interrupted (for "continue" recovery)
+  interruptWorkerContext?: import('../../shared/types/hyper-space').InterruptWorkerContext;
 }
 
 // Worker session state — isolated streaming state for each active worker
@@ -230,6 +234,35 @@ const workerStreamPendingDeltas = new Map<
 >();
 
 /**
+ * Create a temporary WorkerSessionState for auto-create scenarios.
+ * Ensures all fields (including childConversationId) are properly initialized.
+ */
+function createTemporaryWorkerSession(
+  agentId: string,
+  agentName: string,
+  parentConvId: string,
+): WorkerSessionState {
+  return {
+    agentId,
+    agentName,
+    taskId: null,
+    task: '',
+    isRunning: true,
+    status: 'running',
+    streamingContent: '',
+    isStreaming: false,
+    thoughts: [],
+    isThinking: false,
+    textBlockVersion: 0,
+    error: null,
+    completedAt: null,
+    childConversationId: `${parentConvId}:agent-${agentId}`,
+    interactionMode: 'delegation',
+    turnStartedAt: 0,
+  };
+}
+
+/**
  * Flush a throttled worker stream update into the Zustand store.
  * This is called from within handleAgentMessage and has access to `set` via closure.
  */
@@ -259,24 +292,21 @@ function applyWorkerStreamUpdate(
     const parentConvId = baseConvId(conversationId);
     const newWorkerSessions = new Map(session.workerSessions);
     const ws = newWorkerSessions.get(agentId);
-    const workerSession = ws || {
-      agentId,
-      agentName: rawData.agentName || agentId,
-      taskId: null,
-      task: '',
-      isRunning: true,
-      status: 'running' as const,
-      streamingContent: '',
-      isStreaming: false,
-      thoughts: [],
-      isThinking: false,
-      textBlockVersion: 0,
-      error: null,
-      completedAt: null,
-      pendingQuestion: null,
-      interactionMode: 'delegation',
-      turnStartedAt: 0,
-    };
+    let workerSession: WorkerSessionState;
+    if (ws) {
+      // If existing session was auto-created (no childConversationId), patch it
+      if (!ws.childConversationId) {
+        workerSession = { ...ws, childConversationId: `${parentConvId}:agent-${agentId}` };
+      } else {
+        workerSession = ws;
+      }
+    } else {
+      workerSession = createTemporaryWorkerSession(
+        agentId,
+        rawData.agentName || agentId,
+        parentConvId,
+      );
+    }
 
     const newTextBlockVersion = pending.isNewTextBlock
       ? (workerSession.textBlockVersion || 0) + 1
@@ -349,6 +379,7 @@ function createEmptySessionState(): SessionState {
     idleTimeout: null,
     compactInfo: null,
     currentContextUsage: null,
+    contextUsageSource: null,
     textBlockVersion: 0,
     pendingQuestion: null,
     pendingToolPermission: null,
@@ -453,6 +484,12 @@ interface ChatState {
 
   // Error handling
   continueAfterInterrupt: (conversationId: string) => void;
+
+  // Interrupt context handling
+  handleInterruptContext: (
+    conversationId: string,
+    context: import('../../shared/types/hyper-space').InterruptWorkerContext,
+  ) => void;
 
   // Clear pending messages
   clearPendingMessages: (conversationId: string) => void;
@@ -1418,7 +1455,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
           error: null,
           errorType: null,
           compactInfo: null,
-          currentContextUsage: null,
+          // Preserve previous context usage until new estimate arrives — prevents "--/200K" flash
+          currentContextUsage: existingSession?.currentContextUsage ?? null,
+          contextUsageSource: existingSession?.contextUsageSource ?? null,
           textBlockVersion: 0,
           pendingQuestion: null,
           pendingToolPermission: null,
@@ -1656,7 +1695,38 @@ export const useChatStore = create<ChatState>((set, get) => ({
   // Continue conversation after interrupt (used by InterruptedBubble)
   // Clears error state and sends a "continue" message to AI to resume the interrupted response
   continueAfterInterrupt: (conversationId: string) => {
-    // First clear the error state
+    // Build context-enriched continue message if worker context is available
+    const currentState = get();
+    const session = currentState.sessions.get(conversationId);
+    let continueMessage = 'continue';
+
+    if (session?.interruptWorkerContext) {
+      const ctx = session.interruptWorkerContext;
+      const parts: string[] = [
+        '[System: The previous response was interrupted. Resuming with current worker status:]',
+      ];
+
+      if (ctx.runningWorkers.length > 0) {
+        parts.push('\n**Still running:**');
+        for (const w of ctx.runningWorkers) {
+          const taskPreview = w.task.length > 200 ? w.task.slice(0, 200) + '...' : w.task;
+          parts.push(`- Worker "${w.agentName}" (task: ${taskPreview})`);
+        }
+      }
+
+      if (ctx.completedWorkers.length > 0) {
+        parts.push('\n**Completed since interruption:**');
+        for (const w of ctx.completedWorkers) {
+          const summary = w.result?.slice(0, 500) || w.error || 'No result';
+          parts.push(`- Worker "${w.agentName}": ${summary}`);
+        }
+      }
+
+      parts.push('\nPlease continue based on the above worker status.');
+      continueMessage = parts.join('\n');
+    }
+
+    // Clear error state AND worker context
     set((state) => {
       const newSessions = new Map(state.sessions);
       const session = newSessions.get(conversationId);
@@ -1665,17 +1735,36 @@ export const useChatStore = create<ChatState>((set, get) => ({
           ...session,
           error: null,
           errorType: null,
+          interruptWorkerContext: undefined,
         });
       }
       return { sessions: newSessions };
     });
 
-    // Then send a "continue" message to AI
+    // Send the context-enriched continue message
     const state = get();
     const spaceState = state.spaceStates.get(state.currentSpaceId || '');
     if (spaceState?.currentConversationId === conversationId) {
-      state.sendMessage('continue');
+      state.sendMessage(continueMessage);
     }
+  },
+
+  // Save worker context received when Leader stream is interrupted
+  handleInterruptContext: (
+    conversationId: string,
+    context: import('../../shared/types/hyper-space').InterruptWorkerContext,
+  ) => {
+    set((state) => {
+      const newSessions = new Map(state.sessions);
+      const session = newSessions.get(conversationId);
+      if (session) {
+        newSessions.set(conversationId, {
+          ...session,
+          interruptWorkerContext: context,
+        });
+      }
+      return { sessions: newSessions };
+    });
   },
 
   // Clear pending messages for a conversation
@@ -1725,6 +1814,14 @@ export const useChatStore = create<ChatState>((set, get) => ({
 
     // Route to worker session if agentId is present
     if (agentId) {
+      // Keep parent session's inactivity timer alive while worker is streaming
+      set((state) => {
+        const newSessions = new Map(state.sessions);
+        const s = newSessions.get(conversationId);
+        if (s) newSessions.set(conversationId, { ...s, lastActivityAt: Date.now() });
+        return { sessions: newSessions };
+      });
+
       // Use throttle buffer to batch worker streaming deltas into fewer set() calls.
       // This prevents excessive React re-renders when multiple workers stream concurrently.
       const throttleKey = `${conversationId}:${agentId}`;
@@ -1778,19 +1875,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
       return;
     }
 
-    // DEBUG: Log all incoming agent messages
-    console.log(
-      `[ChatStore] handleAgentMessage received for ${conversationId}, delta: ${delta?.substring(0, 20)}...`,
-    );
-
     set((state) => {
       const newSessions = new Map(state.sessions);
       const session = newSessions.get(conversationId);
-
-      // DEBUG: Log session state
-      console.log(
-        `[ChatStore] Session exists: ${!!session}, isGenerating: ${session?.isGenerating}, isStopping: ${session?.isStopping}`,
-      );
 
       // CRITICAL: Ignore events if not generating or if stopping
       // This prevents stale events from previous requests after interrupt
@@ -2035,6 +2122,23 @@ export const useChatStore = create<ChatState>((set, get) => ({
             cacheCreationTokens: tokenUsage.cacheCreationTokens,
             contextWindow: newContextWindow,
           },
+          contextUsageSource: 'api',
+        });
+        return { sessions: newSessions };
+      });
+    } else {
+      // No API token data: preserve local estimate as contextUsageSource
+      // The currentContextUsage was already updated by handleAgentContextUsage
+      // with isEstimate events during streaming. Just ensure the source is 'estimate'.
+      set((state) => {
+        const newSessions = new Map(state.sessions);
+        const session = newSessions.get(conversationId);
+        if (!session) return state;
+        // Keep existing estimate value, only ensure source is marked
+        if (session.contextUsageSource === 'api') return state;
+        newSessions.set(conversationId, {
+          ...session,
+          contextUsageSource: session.currentContextUsage ? 'estimate' : null,
         });
         return { sessions: newSessions };
       });
@@ -2156,7 +2260,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 streamingContent: '',
                 thoughts: [],
                 compactInfo: null,
-                currentContextUsage: null,
+                // Preserve context usage during consecutive generation
+                currentContextUsage: currentSession.currentContextUsage,
+                contextUsageSource: currentSession.contextUsageSource,
                 pendingQuestion: null,
                 pendingToolPermission: null,
                 error: null,
@@ -2172,6 +2278,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
               // They will be cleared on the next user message (sendMessage).
               // CRITICAL: Do NOT clear thoughts here — ThoughtProcess relies on it
               // to display subagent collapsible groups after stream completion.
+              // CRITICAL: Preserve error/errorType if handleAgentError already set them
+              // during the async await above — prevents race condition where error is lost.
               newSessions.set(conversationId, {
                 ...currentSession,
                 isGenerating: false,
@@ -2182,8 +2290,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
                 compactInfo: null, // Clear temporary compact notification
                 pendingQuestion: null, // Clear pending question
                 pendingToolPermission: null, // Clear pending tool permission
-                error: null, // Clear session error — now persisted in message.error
-                errorType: null,
+                error: currentSession.error || null, // Preserve error if already set by handleAgentError
+                errorType: currentSession.errorType || null,
               });
             }
           }
@@ -2197,9 +2305,8 @@ export const useChatStore = create<ChatState>((set, get) => ({
         console.log(`[ChatStore] Conversation reloaded from backend [${conversationId}]`);
 
         // If there were pending messages, send the first one now
-        // Use nextPendingMessage captured from inside set() (current state, not stale snapshot)
-        if (nextPendingMessage) {
-          // Build canvas context (uses module-level buildCanvasContext)
+        if (pendingMessages.length > 0) {
+          const nextPendingMessage = pendingMessages[0];
 
           // Send the pending message — backend addMessage() writes to DB,
           // next handleAgentComplete reload brings correct ordering.
@@ -2211,12 +2318,12 @@ export const useChatStore = create<ChatState>((set, get) => ({
           await api.sendMessage({
             spaceId,
             conversationId,
-            message: nextMessage.content,
-            images: nextMessage.images,
-            aiBrowserEnabled: nextMessage.aiBrowserEnabled,
-            thinkingEnabled: nextMessage.thinkingEnabled,
+            message: nextPendingMessage.content,
+            images: nextPendingMessage.images,
+            aiBrowserEnabled: nextPendingMessage.aiBrowserEnabled,
+            thinkingEnabled: nextPendingMessage.thinkingEnabled,
             canvasContext: buildCanvasContext(),
-            agentId: nextMessage.agentId || 'leader',
+            agentId: nextPendingMessage.agentId || 'leader',
             activeKnowledgeBases: currentKbIds.length > 0 ? currentKbIds : undefined,
           });
         }
@@ -2237,7 +2344,9 @@ export const useChatStore = create<ChatState>((set, get) => ({
             streamingContent: '',
             thoughts: [], // Clear thoughts
             compactInfo: null, // Clear temporary compact notification
-            currentContextUsage: null,
+            // Preserve context usage on error so user can still see accumulated context
+            currentContextUsage: currentSession.currentContextUsage,
+            contextUsageSource: currentSession.contextUsageSource,
             pendingQuestion: null, // Clear pending question
             pendingToolPermission: null, // Clear pending tool permission
             pendingMessages: [], // Clear pending messages on error
@@ -2256,12 +2365,6 @@ export const useChatStore = create<ChatState>((set, get) => ({
       agentName?: string;
       thought: Thought;
     };
-    console.log(
-      `[ChatStore] handleAgentThought [${conversationId}]${agentId ? ` agent=${agentId}` : ''}:`,
-      thought.type,
-      thought.id,
-    );
-
     // Route to worker session if agentId is present
     if (agentId) {
       set((state) => {
@@ -2280,22 +2383,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
         // Auto-create temporary worker session if not found yet
         // (worker:started may arrive after first agent:thought due to IPC ordering)
         if (!ws) {
-          ws = {
+          ws = createTemporaryWorkerSession(
             agentId,
-            agentName: thought.agentName || agentId,
-            taskId: null,
-            task: '',
-            isRunning: true,
-            status: 'running' as const,
-            streamingContent: '',
-            isStreaming: false,
-            thoughts: [],
-            isThinking: false,
-            textBlockVersion: 0,
-            error: null,
-            completedAt: null,
-            pendingQuestion: null,
-          };
+            thought.agentName || agentId,
+            baseConvId(conversationId),
+          );
           newWorkerSessions.set(agentId, ws);
         }
 
@@ -2395,11 +2487,30 @@ export const useChatStore = create<ChatState>((set, get) => ({
         }
 
         const newWorkerSessions = new Map(session.workerSessions);
-        const ws = newWorkerSessions.get(agentId);
-        if (!ws) return state;
+        let ws = newWorkerSessions.get(agentId);
+        if (!ws) {
+          ws = createTemporaryWorkerSession(
+            agentId,
+            data.agentName || agentId,
+            baseConvId(conversationId),
+          );
+          newWorkerSessions.set(agentId, ws);
+        }
 
-        const thoughtIndex = ws.thoughts.findIndex((t) => t.id === thoughtId);
-        if (thoughtIndex === -1) return state;
+        let thoughtIndex = ws.thoughts.findIndex((t) => t.id === thoughtId);
+        if (thoughtIndex === -1) {
+          // Thought hasn't been created by handleAgentThought yet (IPC ordering).
+          // Create a placeholder so deltas can accumulate.
+          const placeholder: Thought = {
+            id: thoughtId,
+            content: '',
+            isStreaming: true,
+            createdAt: new Date().toISOString(),
+          };
+          ws = { ...ws, thoughts: [...ws.thoughts, placeholder], isThinking: true };
+          newWorkerSessions.set(agentId, ws);
+          thoughtIndex = ws.thoughts.length - 1;
+        }
 
         const newThoughts = [...ws.thoughts];
         const thought = { ...newThoughts[thoughtIndex] };
@@ -2525,24 +2636,44 @@ export const useChatStore = create<ChatState>((set, get) => ({
       cacheReadTokens,
       cacheCreationTokens,
       contextWindow: passedContextWindow,
-    } = data;
+      isEstimate,
+      estimatedTokens,
+    } = data as typeof data & { isEstimate?: boolean; estimatedTokens?: number };
 
     set((state) => {
       const newSessions = new Map(state.sessions);
       const session = newSessions.get(conversationId);
       if (!session) return state;
 
-      newSessions.set(conversationId, {
-        ...session,
-        currentContextUsage: {
+      const updates: Partial<SessionState> = {
+        lastActivityAt: Date.now(),
+      };
+
+      if (isEstimate) {
+        // Local estimation: only update currentContextUsage if no API value present
+        if (session.contextUsageSource !== 'api') {
+          updates.currentContextUsage = {
+            inputTokens: estimatedTokens ?? inputTokens,
+            outputTokens: 0,
+            cacheReadTokens: 0,
+            cacheCreationTokens: 0,
+            contextWindow: passedContextWindow ?? session.currentContextUsage?.contextWindow ?? 200000,
+          };
+          updates.contextUsageSource = 'estimate';
+        }
+      } else {
+        // API precise value: always override
+        updates.currentContextUsage = {
           inputTokens,
           outputTokens,
           cacheReadTokens,
           cacheCreationTokens,
           contextWindow: passedContextWindow ?? session.currentContextUsage?.contextWindow ?? 200000,
-        },
-        lastActivityAt: Date.now(),
-      });
+        };
+        updates.contextUsageSource = 'api';
+      }
+
+      newSessions.set(conversationId, { ...session, ...updates });
       return { sessions: newSessions };
     });
   },
@@ -2833,6 +2964,11 @@ export const useChatStore = create<ChatState>((set, get) => ({
       // Reuse existing worker session if same agent is still active (update task)
       // Also preserves content from temporary sessions created by early agent:message events
       const existing = newWorkerSessions.get(agentId);
+      // Detect whether this is a NEW task for the same worker (different taskId)
+      // vs an IPC timing re-order where worker:started arrives after early thoughts.
+      // Only reset state when the taskId actually changes — preserving thoughts for
+      // the IPC race condition where thought events arrive before worker:started.
+      const isNewTask = !!(existing?.taskId && taskId && existing.taskId !== taskId);
       // Build child conversation ID for loading persisted message history
       const childConvId = `${parentConvId}:agent-${agentId}`;
       const isTemporarySession = existing && !existing.childConversationId;
@@ -2843,11 +2979,13 @@ export const useChatStore = create<ChatState>((set, get) => ({
         task: task || '',
         isRunning: true,
         status: 'running',
-        streamingContent: isTemporarySession ? existing.streamingContent : '',
+        streamingContent: isNewTask ? '' : (existing?.streamingContent || ''),
         isStreaming: false,
-        thoughts: isTemporarySession ? existing.thoughts : [],
+        // Preserve existing thoughts for IPC race condition, but clear when
+        // the same worker starts a genuinely new task (different taskId).
+        thoughts: isNewTask ? [] : (existing?.thoughts || []),
         isThinking: false,
-        textBlockVersion: 0,
+        textBlockVersion: isNewTask ? 0 : (existing?.textBlockVersion || 0),
         error: null,
         completedAt: null,
         type: type || existing?.type || 'local',
@@ -2921,6 +3059,7 @@ export const useChatStore = create<ChatState>((set, get) => ({
         error: error || null,
         isStreaming: false,
         isThinking: false,
+        streamingContent: '',  // Clear streamed content on completion
         completedAt: Date.now(),
         // Cancel pending question if still active when worker completes
         pendingQuestion:

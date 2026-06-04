@@ -447,6 +447,8 @@ export async function ensureSessionWarm(spaceId: string, conversationId: string)
     mcpServers: Object.keys(mcpServers).length > 0 ? mcpServers : null,
     maxTurns: config.agent?.maxTurns,
     contextWindow: resolvedCredentials.contextWindow,
+    additionalDisallowedTools: ['Agent', 'Task'],
+    allowSubagents: false,
   });
 
   try {

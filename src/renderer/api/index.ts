@@ -992,6 +992,8 @@ export const api = {
     onEvent('agent:turn-boundary', callback),
   onAgentInjectionStart: (callback: (data: unknown) => void) =>
     onEvent('agent:injection-start', callback),
+  onAgentInterruptContext: (callback: (data: unknown) => void) =>
+    onEvent('agent:interrupt-context', callback),
   onAgentTeamMessage: (callback: (data: unknown) => void) =>
     onEvent('agent:team-message', callback),
   onWorkerStarted: (callback: (data: unknown) => void) => onEvent('worker:started', callback),
@@ -2379,6 +2381,24 @@ export const api = {
     return httpRequest('POST', '/api/skills/install', input);
   },
 
+  skillImportFromArchive: async (file: File): Promise<
+    ApiResponse<{ installed: string[]; skipped: string[]; errors: string[] }>
+  > => {
+    if (isElectron()) {
+      throw new Error('Use window.aicoBot.skillImportSkills directly in Electron mode');
+    }
+    const formData = new FormData();
+    formData.append('file', file);
+    const token = getAuthToken();
+    const response = await fetch(`${getRemoteServerUrl()}/api/skills/import-from-archive`, {
+      method: 'POST',
+      headers: token ? { Authorization: `Bearer ${token}` } : {},
+      body: formData,
+    });
+    return response.json();
+  },
+
+  /** @deprecated Use skillImportFromArchive instead */
   skillImportFromZip: async (file: File): Promise<
     ApiResponse<{ installed: string[]; skipped: string[]; errors: string[] }>
   > => {
@@ -2388,7 +2408,7 @@ export const api = {
     const formData = new FormData();
     formData.append('file', file);
     const token = getAuthToken();
-    const response = await fetch(`${getRemoteServerUrl()}/api/skills/import-from-zip`, {
+    const response = await fetch(`${getRemoteServerUrl()}/api/skills/import-from-archive`, {
       method: 'POST',
       headers: token ? { Authorization: `Bearer ${token}` } : {},
       body: formData,

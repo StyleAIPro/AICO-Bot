@@ -7,6 +7,7 @@
 
 ### Added
 - 远程技能 Direct Upload 安装：GitCode 技能可直接安装到远程服务器（本机 API 下载→SSH 上传），GitHub npx 失败时自动 fallback — `src/main/services/remote-deploy/remote-deploy.service.ts`、`src/main/controllers/skill.controller.ts` — PRD: `prd/feature/skill/feature-direct-remote-skill-install-v1.md`
+- 离线部署包集成 gh CLI：构建时自动下载 linux-x64/arm64 gh 二进制并打包进 tar.xz，远程部署后 gh 命令自动可用 — `packages/remote-agent-proxy/scripts/build-offline-bundle.mjs`、`deploy-env.sh`、`agent-deployer.ts` — PRD: `prd/feature/remote-deploy/feature-gh-cli-offline-bundle-v1.md`
 - BUG-001: 远程 Direct Upload 安装目录名错误（使用完整市场 ID 做目录名而非从 skillName 派生短 ID，导致技能被装到 `~/.agents/skills/gitcode:Ascend/agent-skill:skills/commit/` 而非 `~/.agents/skills/commit/`） — `src/main/services/remote-deploy/remote-deploy.service.ts` — PRD: `prd/bugfix/skill/bugfix-remote-skill-dir-name-v1.md`
 
 ### Fixed
@@ -15,6 +16,7 @@
 - BUG-010: 分类目录被误显示为 Skill（listSkillsFromRepo 未过滤无 SKILL.md 的目录） — `src/main/services/skill/gitcode-skill-source.service.ts`、`src/main/services/skill/github-skill-source.service.ts` — PRD: `prd/bugfix/skill/bugfix-non-skill-dirs-shown-v1.md`
 - BUG-006: GitCode 技能安装长时间挂起（downloadSkill 无进度回调 + getSkillDetail 失败路径大小写不匹配 + findSkillDirectoryPath fallback 递归深度过大 + 无整体超时） — `src/main/services/skill/skill-market-service.ts`、`src/main/services/skill/gitcode-skill-source.service.ts`、`src/main/controllers/skill.controller.ts` — PRD: `prd/bugfix/skill/bugfix-skill-install-hang-v1.md`
 - BUG-001: Worker 内部 SDK 子 agent 产生多余 Worker Tab（复杂任务时 Worker 调用 Agent/Task 工具，stream-processor 无条件发送 worker:started 到前端） — `src/main/services/agent/stream-processor.ts` — PRD: `prd/bugfix/agent/bugfix-excessive-subagents-v2`
+- 远程模式错误信息不显示：catch 块补充 `agent:error` 事件 + `agent:error`/`agent:complete` 发送顺序调整 + `handleAgentComplete` 保护已有 error + 子 Agent 错误详情保留 — PRD: `prd/bugfix/agent/bugfix-agent-error-log-truncation-v1.md`
 - BUG-001: Hyper Space Leader 创建过多子 Agent（声明 N 个实际创建 N+2，SDK 内置 Agent/Task 工具与 spawn_subagent 冲突） — `src/main/services/agent/sdk-config.ts`、`src/main/services/agent/orchestrator.ts`、`src/main/services/agent/system-prompt.ts` — PRD: `prd/bugfix/agent/bugfix-excessive-subagents-v1`
 - BUG-001: GitCode 技能获取全面失败（rate limiter 失效 + 无超时 + getSkills()/searchSkills() 吞没错误 + 缓存空结果 + UI 无错误展示 + 代理不刷新） — `src/main/services/skill/gitcode-skill-source.service.ts`、`src/main/services/skill/skill-market-service.ts`、`src/renderer/components/skill/SkillMarket.tsx` — modules/skill/features/skill-market/bugfix.md — PRD: `prd/bugfix/skill/bugfix-gitcode-skill-fetch-v1.md`
 - BUG-003: 技能市场 UX 精修（GitCode 顺序获取进度均匀化 + 前端源选择同步后端 activeSourceId + GitHub 恢复并行获取减少请求延迟） — `src/main/services/skill/gitcode-skill-source.service.ts`、`src/main/services/skill/github-skill-source.service.ts`、`src/renderer/stores/skill/skill.store.ts`、`src/renderer/components/skill/SkillMarket.tsx` — modules/skill/features/skill-market/bugfix.md — PRD: `prd/bugfix/skill/bugfix-skill-market-ux-v1.md`

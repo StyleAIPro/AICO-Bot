@@ -48,6 +48,8 @@ interface CanUseToolDeps {
   agentId?: string;
   agentName?: string;
   trustMode?: boolean;
+  /** Whether to allow Agent/Task tool usage (only for Hyper Space Worker context) */
+  allowSubagents?: boolean;
 }
 
 // ============================================
@@ -281,6 +283,17 @@ export function createCanUseTool(deps?: CanUseToolDeps): CanUseToolFn {
     input: Record<string, unknown>,
     options: { signal: AbortSignal },
   ): Promise<PermissionResult> => {
+    // Block Agent/Task tools to prevent unwanted subagent spawning.
+    // SDK's disallowedTools does NOT work for Agent tool (managed by agentDefinitions subsystem),
+    // so this canUseTool callback is the only reliable interception point.
+    if (!deps?.allowSubagents && (toolName === 'Agent' || toolName === 'Task')) {
+      console.log(`[PermissionHandler] Blocked tool: ${toolName} (subagent creation disabled)`);
+      return {
+        behavior: 'deny' as const,
+        message: '子 Agent 创建已禁用。请直接使用现有工具（Read, Write, Edit, Grep, Glob, Bash, Skill）完成任务。',
+      };
+    }
+
     // Skill tool: block disabled skills
     if (toolName === 'Skill') {
       const disabledIds = SkillManager.getGlobalDisabledSkillIds();

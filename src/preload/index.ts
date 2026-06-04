@@ -221,6 +221,7 @@ export interface AicoBotAPI {
   onAgentTerminal: (callback: (data: unknown) => void) => () => void;
   onAgentTurnBoundary: (callback: (data: unknown) => void) => () => void;
   onAgentInjectionStart: (callback: (data: unknown) => void) => () => void;
+  onAgentInterruptContext: (callback: (data: unknown) => void) => () => void;
   onAgentTeamMessage: (callback: (data: unknown) => void) => () => void;
   onWorkerStarted: (callback: (data: unknown) => void) => () => void;
   onWorkerCompleted: (callback: (data: unknown) => void) => () => void;
@@ -611,7 +612,7 @@ export interface AicoBotAPI {
     skillId?: string;
     yamlContent?: string;
   }) => Promise<IpcResponse>;
-  skillImportSkills: (input: { sourceType: 'zip' | 'folder'; filePath: string }) => Promise<IpcResponse>;
+  skillImportSkills: (input: { sourceType: 'archive' | 'folder'; filePath: string }) => Promise<IpcResponse>;
   skillFiles: (skillId: string) => Promise<IpcResponse>;
   skillFileContent: (skillId: string, filePath: string) => Promise<IpcResponse>;
   skillFileSave: (skillId: string, filePath: string, content: string) => Promise<IpcResponse>;
@@ -978,6 +979,7 @@ const api: AicoBotAPI = {
   onAgentTerminal: (callback) => createEventListener('agent:terminal', callback),
   onAgentTurnBoundary: (callback) => createEventListener('agent:turn-boundary', callback),
   onAgentInjectionStart: (callback) => createEventListener('agent:injection-start', callback),
+  onAgentInterruptContext: (callback) => createEventListener('agent:interrupt-context', callback),
   onAgentTeamMessage: (callback) => createEventListener('agent:team-message', callback),
   onWorkerStarted: (callback) => createEventListener('worker:started', callback),
   onWorkerCompleted: (callback) => createEventListener('worker:completed', callback),

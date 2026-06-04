@@ -59,6 +59,7 @@ import { resolveCredentialsForSdk, buildBaseSdkOptions } from './sdk-config';
 import { processStream, getAndClearInjection } from './stream-processor';
 import { agentOrchestrator } from './orchestrator';
 import { executeRemoteMessage } from './send-message-remote';
+import { estimateContextTokens, estimateSystemPromptTokens, buildEstimatedContextUsage } from './token-estimator';
 
 // Unified fallback error suffix - guides user to check logs
 const FALLBACK_ERROR_HINT = 'Check logs in Settings > System > Logs.';
@@ -351,6 +352,8 @@ export async function sendMessage(
         proxyEnabled: !!getEffectiveProxyUrl(),
       },
       trustMode: config.permissions?.trustMode ?? false,
+      additionalDisallowedTools: ['Agent', 'Task'],
+      allowSubagents: false,
     });
 
     // Apply dynamic configurations (Knowledge Base context, AI Browser system prompt, Thinking mode)
@@ -509,6 +512,30 @@ export async function sendMessage(
     // Mark session request start for health tracking
     markSessionRequestStart(conversationId);
 
+    // Pre-send local estimation: estimate context tokens before sending to API
+    // Use dynamic system prompt estimation instead of fixed SYSTEM_PROMPT_OVERHEAD
+    const contextWindowForEstimate = resolvedCredentials.contextWindow || 200000;
+    const mcpToolCount = mcpServerNames.length; // MCP server names already computed above
+    const systemPromptTokens = estimateSystemPromptTokens(
+      {
+        workDir,
+        modelInfo: resolvedCredentials.displayModel,
+        ghSearchStatus: {
+          patConfigured: !!getGitHubToken(),
+          proxyEnabled: !!getEffectiveProxyUrl(),
+        },
+      },
+      mcpToolCount,
+      !!aiBrowserEnabled,
+    );
+    const estimatedTokens = estimateContextTokens(spaceId, conversationId, systemPromptTokens);
+    sendToRenderer('agent:context-usage', spaceId, conversationId,
+      buildEstimatedContextUsage(estimatedTokens, contextWindowForEstimate),
+    );
+    console.log(
+      `[Agent][${conversationId}] Pre-send estimation: ~${estimatedTokens} tokens (sysPrompt: ${systemPromptTokens}) / ${contextWindowForEstimate}`,
+    );
+
     try {
       // Process the stream using shared stream processor
       // The stream processor handles all streaming logic, renderer events,
@@ -537,6 +564,7 @@ export async function sendMessage(
           abortController,
           t0,
           contextWindow: resolvedCredentials.contextWindow,
+          estimatedContextBaseline: estimatedTokens,
           callbacks: {
             onComplete: (streamResult) => {
               // Only mark request complete and unregister if NOT continuing
@@ -739,6 +767,8 @@ export async function sendMessage(
             maxTurns: config.agent?.maxTurns,
             contextWindow: freshResolved.contextWindow,
             trustMode: config.permissions?.trustMode ?? false,
+            additionalDisallowedTools: ['Agent', 'Task'],
+            allowSubagents: false,
           });
 
           // Apply dynamic configurations (AI Browser system prompt, Thinking mode)

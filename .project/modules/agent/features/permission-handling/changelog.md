@@ -9,3 +9,4 @@
 | 2026-05-11 | BUG-004 修复：远程 Agent 权限系统完全失效 — 远程代理 permissionMode 改 default、移除 dangerously-skip-permissions、实现破坏性 Bash 检测、新增 permission:request/response WebSocket 协议、send-message-remote 转发权限请求到本地 UI | @mi-saka | BUG修复 |
 | 2026-05-12 | BUG-005 修复：远程 Agent 权限 Deny 不生效 — server.ts tool:approve handler 改为读取 payload.approved 而非硬编码 true；agent.ts IPC handler 根据 approved 值发送 tool:approve 或 tool:reject | @mi-saka | BUG修复 |
 | 2026-05-12 | BUG-006 修复：远程 Agent 会话复用时权限回调丢失 — SessionConfig 增加 permissionMode 字段、needsSessionRebuild 增加 permissionMode 检查、会话复用路径有 canUseTool 时强制重建会话 | @mi-saka | BUG修复 |
+| 2026-05-30 | BUG-007 修复：SDK disallowedTools 对 Agent 工具无效 — canUseTool 层硬拦截 Agent/Task 工具，新增 allowSubagents 参数控制 Worker 例外；远程代理 canUseTool 改为始终创建 + 添加 disallowedTools — PRD: `prd/bugfix/agent/bugfix-excessive-subagents-v5` | misakamikoto | bugfix-excessive-subagents-v5 |

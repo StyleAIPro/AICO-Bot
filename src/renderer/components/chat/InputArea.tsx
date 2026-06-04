@@ -88,6 +88,7 @@ interface InputAreaProps {
     cacheCreationTokens: number;
     contextWindow: number;
   } | null;
+  contextUsageSource?: 'api' | 'estimate' | null;
 }
 
 export interface InputAreaRef {
@@ -108,6 +109,7 @@ function InputAreaInternal(
     spaceId,
     conversationId,
     contextUsage,
+    contextUsageSource,
   }: InputAreaProps,
   ref: ForwardedRef<InputAreaRef>,
 ) {
@@ -677,6 +679,7 @@ function InputAreaInternal(
             onToggleKb={toggleActiveKb}
             activeCount={activeKnowledgeBaseIds.length}
             contextUsage={contextUsage}
+            contextUsageSource={contextUsageSource}
           />
         </div>
       </div>
@@ -694,6 +697,7 @@ function formatTokens(tokens: number): string {
 
 function ContextUsageDisplay({
   contextUsage,
+  isEstimate = false,
 }: {
   contextUsage?: {
     inputTokens: number;
@@ -702,6 +706,7 @@ function ContextUsageDisplay({
     cacheCreationTokens: number;
     contextWindow: number;
   } | null;
+  isEstimate?: boolean;
 }) {
   if (!contextUsage) {
     return (
@@ -720,11 +725,19 @@ function ContextUsageDisplay({
   const usagePercent = Math.round((contextUsed / contextWindow) * 100);
 
   const colorClass =
-    usagePercent >= 80 ? 'text-red-500/80' : usagePercent >= 60 ? 'text-amber-500/80' : 'text-muted-foreground/50';
+    usagePercent >= 95
+      ? 'text-red-500/80'
+      : usagePercent >= 85
+        ? 'text-orange-500/80'
+        : usagePercent >= 70
+          ? 'text-amber-400/80'
+          : 'text-muted-foreground/50';
+
+  const prefix = isEstimate ? '~' : '';
 
   return (
     <span className={`text-xs cursor-default select-none pl-1 ${colorClass}`}>
-      {formatTokens(contextUsed)} / {formatTokens(contextWindow)} ({usagePercent}%)
+      {prefix}{formatTokens(contextUsed)} / {formatTokens(contextWindow)} ({usagePercent}%)
     </span>
   );
 }
@@ -770,6 +783,7 @@ interface InputToolbarProps {
     cacheCreationTokens: number;
     contextWindow: number;
   } | null;
+  contextUsageSource?: 'api' | 'estimate' | null;
 }
 
 function InputToolbar({
@@ -801,6 +815,7 @@ function InputToolbar({
   onToggleKb,
   activeCount,
   contextUsage,
+  contextUsageSource,
 }: InputToolbarProps) {
   const { t } = useTranslation();
   return (
@@ -993,7 +1008,7 @@ function InputToolbar({
         )}
 
         {/* Context usage indicator */}
-        <ContextUsageDisplay contextUsage={contextUsage} />
+        <ContextUsageDisplay contextUsage={contextUsage} isEstimate={contextUsageSource === 'estimate'} />
       </div>
 
       {/* Right section: pending indicator + action button */}

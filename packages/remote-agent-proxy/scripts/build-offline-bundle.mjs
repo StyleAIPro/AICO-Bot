@@ -279,10 +279,11 @@ for (const target of platforms) {
   fs.rmSync(stagingDir, { recursive: true, force: true });
   fs.mkdirSync(stagingDir, { recursive: true });
 
-  // Copy dist, scripts, package.json
+  // Copy dist, scripts, package.json, preflight.cjs
   fs.cpSync(path.join(rootDir, 'dist'), path.join(stagingDir, 'dist'), { recursive: true });
   fs.cpSync(path.join(rootDir, 'scripts'), path.join(stagingDir, 'scripts'), { recursive: true });
   fs.copyFileSync(path.join(rootDir, 'package.json'), path.join(stagingDir, 'package.json'));
+  fs.copyFileSync(path.join(rootDir, 'preflight.cjs'), path.join(stagingDir, 'preflight.cjs'));
 
   // Copy node_modules
   console.log(`  Copying node_modules (${target.platform}-${target.arch})...`);

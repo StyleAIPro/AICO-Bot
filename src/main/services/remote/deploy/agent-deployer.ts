@@ -88,7 +88,7 @@ export async function createDeployPackage(
   }
 
   // Determine which subdirectories to include alongside package.json and dist/
-  const includes: string[] = ['package.json', 'dist'];
+  const includes: string[] = ['package.json', 'dist', 'preflight.cjs'];
   if (fs.existsSync(path.join(packageDir, 'patches'))) {
     includes.push('patches');
   }
@@ -165,6 +165,87 @@ export function copyRecursiveSync(src: string, dst: string): void {
  */
 export function computeMd5(filePath: string): string {
   return crypto.createHash('md5').update(fs.readFileSync(filePath)).digest('hex');
+}
+
+/**
+ * Upload a file with post-upload MD5 verification and automatic retry.
+ * Checks remote disk space before upload, then compares local/remote MD5 checksums.
+ */
+async function uploadWithVerify(
+  manager: import('../ssh/ssh-manager').SSHManager,
+  localPath: string,
+  remotePath: string,
+  options?: {
+    maxRetries?: number;
+    onAttempt?: (attempt: number, maxRetries: number) => void;
+  },
+): Promise<void> {
+  const maxRetries = options?.maxRetries ?? 3;
+  const localSize = fs.statSync(localPath).size;
+  const localMd5 = computeMd5(localPath);
+
+  // Pre-upload: check remote disk space
+  const requiredSpace = localSize + 100 * 1024 * 1024; // 100MB buffer
+  try {
+    const dfResult = await manager.executeCommandFull(
+      `df -B1 $(dirname ${remotePath}) 2>/dev/null | tail -1 | awk '{print $4}'`,
+    );
+    const availableSpace = parseInt(dfResult.stdout.trim(), 10);
+    if (!isNaN(availableSpace) && availableSpace < requiredSpace) {
+      throw new Error(
+        `远端磁盘空间不足: 需要 ${(requiredSpace / 1024 / 1024).toFixed(0)}MB, 可用 ${(availableSpace / 1024 / 1024).toFixed(0)}MB`,
+      );
+    }
+  } catch (err) {
+    if (err instanceof Error && err.message.startsWith('远端磁盘空间不足')) throw err;
+  }
+
+  for (let attempt = 1; attempt <= maxRetries; attempt++) {
+    options?.onAttempt?.(attempt, maxRetries);
+
+    await manager.uploadFile(localPath, remotePath);
+
+    // Post-upload: verify file size first (quick check)
+    try {
+      const statResult = await manager.stat(remotePath);
+      if (statResult.size !== localSize) {
+        console.warn(
+          `[uploadWithVerify] Size mismatch (attempt ${attempt}/${maxRetries}): local=${localSize}, remote=${statResult.size}`,
+        );
+        if (attempt < maxRetries) {
+          await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+        }
+        continue;
+      }
+    } catch {
+      throw new Error(`上传校验失败: 无法获取远端文件状态 (${remotePath})`);
+    }
+
+    // Post-upload: verify MD5 checksum (integrity check)
+    try {
+      const md5Result = await manager.executeCommandFull(`md5sum ${remotePath} 2>/dev/null`);
+      const remoteMd5 = md5Result.stdout.trim().split(/\s+/)[0];
+      if (remoteMd5 === localMd5) {
+        console.log(`[uploadWithVerify] MD5 verified: ${localMd5}`);
+        return;
+      }
+      console.warn(
+        `[uploadWithVerify] MD5 mismatch (attempt ${attempt}/${maxRetries}): local=${localMd5}, remote=${remoteMd5}`,
+      );
+    } catch {
+      console.warn(`[uploadWithVerify] md5sum not available, falling back to size check`);
+      console.log(`[uploadWithVerify] Size verified: ${localSize} bytes`);
+      return;
+    }
+
+    if (attempt < maxRetries) {
+      await new Promise((resolve) => setTimeout(resolve, Math.pow(2, attempt) * 1000));
+    }
+  }
+
+  throw new Error(
+    `上传校验失败: MD5 不匹配，已重试 ${maxRetries} 次。本地: ${localMd5}`,
+  );
 }
 
 /**
@@ -351,7 +432,7 @@ export async function updateAgentCode(service: RemoteDeployService, id: string):
   const updatedManager = service.getSSHManager(id);
   const remotePackageName = `agent-update-${Date.now()}.tar.gz`;
   const remotePackagePath = `${deployPath}/${remotePackageName}`;
-  await updatedManager.uploadFile(packagePath, remotePackagePath);
+  await uploadWithVerify(updatedManager, packagePath, remotePackagePath);
 
   service.emitDeployProgress(id, 'upload', '正在解压部署包...', 35);
   await manager.executeCommand(
@@ -741,7 +822,14 @@ export async function deployAgentCodeOffline(service: RemoteDeployService, id: s
       service.emitDeployProgress(id, 'upload', '正在上传离线部署包...', 20);
       service.emitCommandOutput(id, 'command', `$ SFTP upload ${path.basename(bundlePath)}`);
       const remoteBundlePath = `${deployPath}/aico-bot-offline.tar.gz`;
-      await manager.uploadFile(bundlePath, remoteBundlePath);
+      await uploadWithVerify(manager, bundlePath, remoteBundlePath, {
+        onAttempt: (attempt, maxRetries) => {
+          if (attempt > 1) {
+            service.emitCommandOutput(id, 'output', `上传校验失败，第 ${attempt}/${maxRetries} 次重试...`);
+          }
+        },
+      });
+      service.emitCommandOutput(id, 'output', `上传校验通过: ${(fs.statSync(bundlePath).size / 1024 / 1024).toFixed(1)}MB`);
       service.emitCommandOutput(id, 'success', '✓ 离线包上传完成');
     }
 
@@ -1028,7 +1116,7 @@ async function startAgentOffline(service: RemoteDeployService, id: string, deplo
     .filter(Boolean)
     .join(' ');
 
-  const startCommand = `nohup env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY ${envVars} ${bundledNodePath} ${deployPath}/dist/index.js > ${deployPath}/logs/output.log 2>&1 &`;
+  const startCommand = `nohup env -u HTTP_PROXY -u HTTPS_PROXY -u http_proxy -u https_proxy -u ALL_PROXY ${envVars} ${bundledNodePath} ${deployPath}/preflight.cjs > ${deployPath}/logs/output.log 2>&1 &`;
   await manager.executeCommand(startCommand);
 
   // Wait for startup

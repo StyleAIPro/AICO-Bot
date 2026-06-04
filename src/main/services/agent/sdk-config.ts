@@ -117,6 +117,8 @@ export interface BaseSdkOptionsParams {
   agentName?: string;
   /** Additional tools to disallow (merged with the default disallowedTools list) */
   additionalDisallowedTools?: string[];
+  /** Whether to allow Agent/Task tool usage (only for Hyper Space Worker context) */
+  allowSubagents?: boolean;
   /** Permission trust mode: true = full permissions (skip destructive checks) */
   trustMode?: boolean;
   /** GitHub search environment status for dynamic system prompt */
@@ -161,8 +163,8 @@ export async function resolveCredentialsForSdk(
     // Direct path (PROXY_ANTHROPIC = false)
     // SDK appends /v1/messages to base URL — strip if user included it
     const cleanBase = (credentials.baseUrl || '').replace(/\/+$/, '')
-      .replace(/\/v\/?messages$/, '')
-      .replace(/\/v\/?message$/, '')
+      .replace(/\/v\d*\/?messages$/, '')
+      .replace(/\/v\d*\/?message$/, '')
       .replace(/\/messages$/, '')
       .replace(/\/message$/, '');
     return {
@@ -242,8 +244,8 @@ async function resolveAnthropicPassthrough(
   // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
   // Strip these suffixes if user included them to avoid duplication.
   const cleanUrl = baseUrl.replace(/\/+$/, '')
-    .replace(/\/v\/?messages$/, '')
-    .replace(/\/v\/?message$/, '')
+    .replace(/\/v\d*\/?messages$/, '')
+    .replace(/\/v\d*\/?message$/, '')
     .replace(/\/messages$/, '')
     .replace(/\/message$/, '');
   const configUrl = cleanUrl + '/v1/messages';
@@ -259,14 +261,27 @@ async function resolveAnthropicPassthrough(
     useProxy: credentials.useProxy,
   });
 
-  console.log(`[SDK Config] Anthropic passthrough: routing via ${router.baseUrl}`);
+  // Check if upstream is the actual Anthropic API or a direct proxy.
+  // For internal/custom models that happen to serve /v1/messages, use a compat
+  // model name so the SDK enables extended thinking (the SDK only enables thinking
+  // for models it recognizes; custom model names aren't in its internal database).
+  // The router's passthrough handler overrides the model before forwarding upstream,
+  // so the real model name is preserved in the actual API request.
+  const isActualAnthropicApi =
+    baseUrl.includes('api.anthropic.com') || baseUrl.includes('/anthropic');
+  const useCompatModel = !isActualAnthropicApi;
+
+  console.log(
+    `[SDK Config] Anthropic passthrough: routing via ${router.baseUrl}${useCompatModel ? ' (compat model for thinking support)' : ''}`,
+  );
 
   return {
     anthropicBaseUrl: router.baseUrl,
     anthropicApiKey,
-    sdkModel: credentials.model || 'claude-opus-4-5-20251101',
+    sdkModel: useCompatModel ? 'claude-sonnet-4-6' : (credentials.model || 'claude-opus-4-5-20251101'),
     displayModel: credentials.displayModel || credentials.model,
     contextWindow: credentials.contextWindow,
+    isCompatModel: useCompatModel ? true : undefined,
   };
 }
 
@@ -750,6 +765,7 @@ export function buildBaseSdkOptions(params: BaseSdkOptionsParams): Record<string
       agentId,
       agentName,
       trustMode,
+      allowSubagents: params.allowSubagents,
     }),
     // Requires SDK patch: enable token-level streaming (stream_event)
     includePartialMessages: true,

@@ -131,10 +131,34 @@ export async function stopGeneration(conversationId?: string): Promise<void> {
       }
 
       console.log(`[Agent] Stopped generation for conversation: ${conversationId}`);
+
+      // Clear pending injection queue for this conversation
+      try {
+        const { clearInjectionsForConversation } = await import('./stream-injection');
+        clearInjectionsForConversation(conversationId);
+      } catch (_) {
+        // stream-injection may not be available
+      }
+
+      // Interrupt HyperSpace workers for this conversation
+      try {
+        const { agentOrchestrator } = await import('./orchestrator');
+        await agentOrchestrator.interruptWorkersForConversation(conversationId);
+      } catch (e) {
+        // Not a HyperSpace conversation or interrupt failed — ignore
+        console.log(`[Agent][control.ts] No HyperSpace workers to interrupt for ${conversationId}`);
+      }
     } else {
       console.log(
         `[Agent][control.ts] No active session found for conversationId=${conversationId}`,
       );
+      // Still clear injection queue even if no active session (e.g., session already exited)
+      try {
+        const { clearInjectionsForConversation } = await import('./stream-injection');
+        clearInjectionsForConversation(conversationId);
+      } catch (_) {
+        // stream-injection may not be available
+      }
     }
   } else {
     // Reject all pending AskUserQuestion prompts when stopping everything.
@@ -171,7 +195,28 @@ export async function stopGeneration(conversationId?: string): Promise<void> {
 
       console.log(`[Agent] Stopped generation for conversation: ${convId}`);
     }
+    // Collect keys before clearing
+    const allConvIds = Array.from(activeSessions.keys());
     activeSessions.clear();
+
+    // Clear all injection queues
+    try {
+      const { clearAllInjections } = await import('./stream-injection');
+      clearAllInjections();
+    } catch (_) {
+      // stream-injection may not be available
+    }
+
+    // Interrupt all HyperSpace workers
+    try {
+      const { agentOrchestrator } = await import('./orchestrator');
+      for (const convId of allConvIds) {
+        await agentOrchestrator.interruptWorkersForConversation(convId);
+      }
+    } catch (_) {
+      // No HyperSpace workers — ignore
+    }
+
     console.log('[Agent] All generations stopped');
   }
 }

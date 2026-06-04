@@ -50,6 +50,42 @@ export interface RequestHandlerOptions {
 
 const DEFAULT_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 
+/** Node.js errno codes that indicate transient network failures (safe to retry). */
+const RETRYABLE_ERRNO_CODES = new Set([
+  'ECONNREFUSED',
+  'ECONNRESET',
+  'ETIMEDOUT',
+  'ENOTFOUND',
+  'ENETUNREACH',
+  'EPIPE',
+  'EHOSTUNREACH',
+  'EAI_AGAIN',
+]);
+
+/** Substrings in error.message that indicate transient network failures. */
+const RETRYABLE_ERROR_KEYWORDS = [
+  'fetch failed',
+  'socket hang up',
+  'connect ETIMEDOUT',
+  'EPROTO',
+];
+
+/**
+ * Return true if the error is a transient network failure that can be safely
+ * retried at the router layer (request never reached upstream).
+ */
+function isRetryableNetworkError(error: unknown): boolean {
+  const err = error as Error | null;
+  if (!err) return false;
+  const message = err.message || '';
+  const code = (err as NodeJS.ErrnoException)?.code || '';
+  if (RETRYABLE_ERRNO_CODES.has(code)) return true;
+  return RETRYABLE_ERROR_KEYWORDS.some((kw) => message.includes(kw));
+}
+
+const NETWORK_MAX_RETRIES = 2;
+const NETWORK_RETRY_BASE_MS = 1000;
+
 /**
  * Anthropic error type to HTTP status code mapping
  */
@@ -420,20 +456,87 @@ async function handleAnthropicPassthrough(
     }
     forwardResponseHeaders(upstreamResp, res);
     res.end(body);
-  } catch (error: any) {
-    if (error?.name === 'AbortError') {
+  } catch (error: unknown) {
+    // 1. Timeout / client disconnect — not retryable
+    if ((error as Error)?.name === 'AbortError') {
       console.error(
         '[RequestHandler] Anthropic passthrough AbortError (timeout or client disconnect)',
       );
       return sendError(res, 'timeout_error', 'Request timed out');
     }
-    // Proxy CONNECT failure — non-retryable (HTTP 400) so SDK surfaces error immediately
+
+    // 2. Proxy CONNECT failure — non-retryable (HTTP 400) so SDK surfaces error immediately
     if (error instanceof ProxyConnectError) {
       console.error('[RequestHandler] Proxy CONNECT failed:', error.message);
       return sendError(res, 'invalid_request_error', `Proxy connection failed: ${error.message}`);
     }
-    console.error('[RequestHandler] Anthropic passthrough error:', error?.message || error);
-    return sendError(res, 'api_error', error?.message || 'Internal error');
+
+    // 3. Transient network errors — fast retry at router layer
+    if (isRetryableNetworkError(error)) {
+      let lastError: unknown = error;
+
+      for (let attempt = 1; attempt <= NETWORK_MAX_RETRIES; attempt++) {
+        const delayMs = Math.min(NETWORK_RETRY_BASE_MS * Math.pow(2, attempt - 1), 4000);
+        console.warn(
+          `[RequestHandler] Network error, retry ${attempt}/${NETWORK_MAX_RETRIES} in ${delayMs}ms: ${(lastError as Error)?.message}`,
+        );
+        await new Promise((resolve) => setTimeout(resolve, delayMs));
+
+        try {
+          const retryResp = await fetchAnthropicUpstream(
+            targetUrl, apiKey, fetchBody, timeoutMs, sdkHeaders, customHeaders, useProxy,
+          );
+          console.log(`[RequestHandler] Network retry ${attempt} upstream response: ${retryResp.status}`);
+
+          if (retryResp.ok) {
+            // Retry succeeded — handle streaming or non-streaming response
+            if (anthropicRequest.stream && retryResp.body) {
+              forwardResponseHeaders(retryResp, res);
+              res.setHeader('Content-Type', 'text/event-stream');
+              res.setHeader('Cache-Control', 'no-cache');
+              res.setHeader('Connection', 'keep-alive');
+              const reader = retryResp.body.getReader();
+              try {
+                while (true) {
+                  const { done, value } = await reader.read();
+                  if (done) break;
+                  res.write(value);
+                }
+              } catch (pipeErr: unknown) {
+                if ((pipeErr as Error)?.name !== 'AbortError') {
+                  console.error('[RequestHandler] Network retry stream pipe error:', (pipeErr as Error)?.message);
+                }
+              } finally {
+                res.end();
+              }
+              return;
+            }
+            const retryBody = await retryResp.text();
+            forwardResponseHeaders(retryResp, res);
+            res.end(retryBody);
+            return;
+          }
+
+          // Got HTTP response but non-2xx — don't retry further, forward to SDK
+          const retryErrorText = await retryResp.text().catch(() => '');
+          res.status(retryResp.status);
+          forwardResponseHeaders(retryResp, res);
+          res.end(retryErrorText);
+          return;
+        } catch (retryError: unknown) {
+          lastError = retryError;
+          if (!isRetryableNetworkError(retryError)) break;
+        }
+      }
+
+      // All retries exhausted — return error to SDK for final fallback
+      console.error(`[RequestHandler] Network retries exhausted (${NETWORK_MAX_RETRIES} attempts)`);
+      return sendError(res, 'api_error', (lastError as Error)?.message || 'Network error after retries');
+    }
+
+    // 4. Other unknown errors — not retryable
+    console.error('[RequestHandler] Anthropic passthrough error:', (error as Error)?.message || error);
+    return sendError(res, 'api_error', (error as Error)?.message || 'Internal error');
   }
 }
 

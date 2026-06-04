@@ -19,6 +19,7 @@ interface TokenUsageIndicatorProps {
   // Warning thresholds (defaults: 80% warning, 95% critical)
   warningThreshold?: number;
   criticalThreshold?: number;
+  isEstimate?: boolean;
 }
 
 // Format number to K format (e.g., 12345 -> "12K")
@@ -43,6 +44,7 @@ export function TokenUsageIndicator({
   className = '',
   warningThreshold = 80,
   criticalThreshold = 95,
+  isEstimate = false,
 }: TokenUsageIndicatorProps) {
   const { t } = useTranslation();
   const [showTooltip, setShowTooltip] = useState(false);
@@ -92,7 +94,7 @@ export function TokenUsageIndicator({
               : 'text-muted-foreground/50'
         }`}
       >
-        {formatTokens(contextUsed)}
+        {isEstimate && <span className="text-muted-foreground/40">~</span>}{formatTokens(contextUsed)}
       </span>
 
       {/* Tooltip - shows on hover/tap */}
@@ -117,7 +119,7 @@ export function TokenUsageIndicator({
               <div className="flex justify-between text-muted-foreground">
                 <span>{t('Used / limit')}</span>
                 <span className="text-foreground">
-                  {formatTokens(contextUsed)} / {formatTokens(contextWindow)}
+                  {isEstimate ? '~' : ''}{formatTokens(contextUsed)} / {formatTokens(contextWindow)}
                 </span>
               </div>
               <div className="flex justify-between text-muted-foreground">

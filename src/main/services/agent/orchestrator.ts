@@ -22,6 +22,7 @@ import type {
   SubagentTaskStatus,
   SubagentAnnouncement,
   AggregationStrategy,
+  InterruptWorkerContext,
 } from '../../../shared/types/hyper-space';
 import {
   createOrchestrationConfig,
@@ -29,8 +30,9 @@ import {
 import { getConversation, getMessageThoughts, updateLastMessage } from '../conversation.service';
 import { extractFileChangesSummaryFromThoughts } from '../../../shared/file-changes';
 import type { Thought } from './types';
-import { mailboxService } from './mailbox';
+import { mailboxService, MAX_RESULT_SIZE } from './mailbox';
 import { taskboardService } from './taskboard';
+import { activeSessions } from './session-lifecycle';
 
 // ============================================
 // Types
@@ -145,13 +147,16 @@ class AgentOrchestrator extends EventEmitter {
   /** Maximum concurrent children per agent */
   private readonly maxChildrenPerAgent = 5;
 
+  /** processStream timeout per call (30 min) to prevent indefinite blocking */
+  private readonly processStreamTimeout = 30 * 60 * 1000;
+
   /** Stall detection timer */
   private stallCheckInterval: NodeJS.Timeout | null = null;
 
   /** Stall detection configuration */
   private stallConfig: StallDetectionConfig = {
-    heartbeatTimeout: 5 * 60 * 1000, // 5 minutes (up from 1 min — NPU tasks need more time)
-    maxTaskDuration: 60 * 60 * 1000, // 1 hour (up from 10 min — supports long training)
+    heartbeatTimeout: 10 * 60 * 1000, // 10 minutes (matches waitForCompletion heartbeat timeout)
+    maxTaskDuration: 2 * 60 * 60 * 1000, // 2 hours (absolute safety limit, same as waitForCompletion)
     checkInterval: 30000, // 30 seconds
   };
 
@@ -388,6 +393,7 @@ class AgentOrchestrator extends EventEmitter {
     const { getWorkingDir, getHeadlessElectronPath, sendToRenderer } = await import('./helpers');
     const { processStream, getAndClearInjection, hasPendingInjection } =
       await import('./stream-processor');
+    const { clearInjectionsForConversation } = await import('./stream-injection');
     const { saveSessionId, updateLastMessage } = await import('../conversation.service');
     const { extractFileChangesSummaryFromThoughts } = await import('../../../shared/file-changes');
     const { FileChangesSummary } = await import('../../../shared/file-changes');
@@ -462,7 +468,7 @@ class AgentOrchestrator extends EventEmitter {
       },
       mcpServers,
       contextWindow: resolvedCredentials.contextWindow,
-      ...(isLeader ? { additionalDisallowedTools: ['Agent', 'Task'] } : {}),
+      ...(isLeader ? { additionalDisallowedTools: ['Agent', 'Task'], allowSubagents: false } : { allowSubagents: true }),
       ghSearchStatus: {
         patConfigured: !!getGitHubToken(),
         proxyEnabled: !!getEffectiveProxyUrl(),
@@ -489,6 +495,13 @@ class AgentOrchestrator extends EventEmitter {
     // Create session state for thought accumulation
     const sessionState = createSessionState(spaceId, conversationId, abortController);
     registerActiveSession(conversationId, sessionState);
+    // Also register under childConversationId — the key used by v2Sessions/session-health.
+    // Without this, invalidateAllSessions()/idle-cleanup check activeSessions.has(childConversationId),
+    // which is always false (only parent was registered), so the "in-flight" guard is bypassed and
+    // the live Leader session gets closed mid-stream → SDK 5s grace timer → "aborted by user".
+    // Parent key is kept because stopGeneration() looks up by parent conversationId.
+    // (PRD: .project/prd/bugfix/hyperspace-worker-abort-v2.md)
+    registerActiveSession(childConversationId, sessionState);
 
     log.info(`[${childConversationId}] Session obtained, processing stream...`);
 
@@ -497,12 +510,50 @@ class AgentOrchestrator extends EventEmitter {
       // When a worker completes, queueInjection() stores the announcement.
       // processStream returns hasPendingInjection=true at stream end if an injection is queued.
       // We pick it up and continue the loop so the Leader LLM processes the result.
-      let currentMessageContent = task;
+
+      // Pre-consume stale injections from a previous interrupted session.
+      // Workers may have completed and queued results while the Leader was interrupted.
+      let enrichedTask = task;
+      if (hasPendingInjection(conversationId)) {
+        const staleInjections: string[] = [];
+        while (hasPendingInjection(conversationId)) {
+          const inj = getAndClearInjection(conversationId);
+          if (inj) staleInjections.push(inj.content);
+        }
+        if (staleInjections.length > 0) {
+          enrichedTask =
+            `[Previous Worker Results (from interrupted session)]\n${staleInjections.join('\n\n')}\n\n---\n\n${task}`;
+          log.info(
+            `[${conversationId}] Pre-consumed ${staleInjections.length} stale injection(s) for resumed session`,
+          );
+        }
+      }
+
+      let currentMessageContent = enrichedTask;
       const maxInjectionCycles = 20; // Safety limit to prevent infinite loops
       let injectionCycles = 0;
 
+      // Heartbeat: emit agent:stream-alive every 10s to prevent the frontend
+      // inactivity timer (30s) from killing the Leader session while waiting for workers.
+      // Also updates agent.lastHeartbeat to prevent stall detection from killing this agent.
+      const heartbeatStart = Date.now();
+      const heartbeatInterval = setInterval(() => {
+        agent.lastHeartbeat = Date.now();
+        sendToRenderer('agent:stream-alive', spaceId, conversationId, {
+          elapsedMs: Date.now() - heartbeatStart,
+          currentToolName: 'waiting_for_workers',
+        });
+      }, 10_000);
+
+      try {
       while (true) {
-        const streamResult = await processStream({
+        // Track timeout timer so we can clear it when processStream returns normally.
+        // Without this, the timer leaks into the waitForCompletion phase and fires
+        // after 30 min, creating an unhandled rejection and potentially aborting the
+        // SDK subprocess via the dangling abortController.
+        let psTimeoutId: ReturnType<typeof setTimeout> | null = null;
+        const streamResult = await Promise.race([
+          processStream({
           v2Session: session,
           sessionState,
           spaceId,
@@ -565,13 +616,55 @@ class AgentOrchestrator extends EventEmitter {
                 );
               }
 
-              // Only unregister when NOT continuing with injection
-              if (!r.hasPendingInjection) {
-                unregisterActiveSession(conversationId);
-              }
+              // NOTE: Do NOT unregister activeSessions here!
+              // onComplete fires at the end of each processStream iteration, but the
+              // orchestrator while loop may still continue (e.g., waitForCompletion can
+              // block for 30+ minutes waiting for workers). If we unregister here,
+              // session-health's idle cleanup (30 min) will kill the session mid-wait.
+              // Unregistration is handled after the while loop exits (in finally block).
+              // (PRD: .project/prd/bugfix/hyperspace-worker-abort-v2.md)
             },
           },
+        }),
+        new Promise<never>((_, reject) => {
+            psTimeoutId = setTimeout(
+              () => reject(new Error(`processStream timed out after ${this.processStreamTimeout / 1000}s`)),
+              this.processStreamTimeout,
+            );
+          }),
+        ]).catch(async (err: unknown) => {
+          // Clear timer on timeout path too
+          if (psTimeoutId) { clearTimeout(psTimeoutId); psTimeoutId = null; }
+          if (err instanceof Error && err.message.includes('timed out')) {
+            console.error(`[Orchestrator] ${err.message}, aborting and continuing`);
+            try { abortController.abort(); } catch {}
+            const { hasPendingInjection } = await import('./stream-processor');
+            return {
+              finalContent: '',
+              thoughts: [],
+              tokenUsage: undefined,
+              hasPendingInjection: hasPendingInjection(conversationId),
+              interrupted: true,
+              errorThought: undefined,
+            } as unknown as Awaited<ReturnType<typeof processStream>>;
+          }
+          throw err;
         });
+        // processStream returned normally — clear the timeout timer so it doesn't
+        // leak into the waitForCompletion phase (prevents 30-min false abort).
+        if (psTimeoutId) { clearTimeout(psTimeoutId); psTimeoutId = null; }
+
+        // If the stream was interrupted and there are active workers,
+        // collect worker context and send to the renderer for the "continue" flow
+        if (streamResult.isInterrupted) {
+          const workerContext = this.collectInterruptWorkerContext(conversationId);
+          if (
+            workerContext &&
+            (workerContext.runningWorkers.length > 0 || workerContext.completedWorkers.length > 0)
+          ) {
+            sendToRenderer('agent:interrupt-context', spaceId, conversationId, workerContext as unknown as Record<string, unknown>);
+          }
+        }
 
         // Check for worker announcement injection (worker completion notification)
         if (streamResult.hasPendingInjection) {
@@ -579,8 +672,15 @@ class AgentOrchestrator extends EventEmitter {
           if (injection) {
             injectionCycles++;
             if (injectionCycles >= maxInjectionCycles) {
-              log.warn(` Max injection cycles (${maxInjectionCycles}) reached, stopping`);
-              unregisterActiveSession(conversationId);
+              log.warn(` Max injection cycles (${maxInjectionCycles}) reached, sending agent:complete and stopping`);
+              // processStream deferred agent:complete because hasPendingInjection was true,
+              // but we won't call processStream again — send it manually before break.
+              sendToRenderer('agent:complete', spaceId, conversationId, {
+                type: 'complete',
+                duration: 0,
+                tokenUsage: undefined,
+              });
+              clearInjectionsForConversation(conversationId);
               break;
             }
             log.debug(
@@ -616,8 +716,13 @@ class AgentOrchestrator extends EventEmitter {
           if (injection) {
             injectionCycles++;
             if (injectionCycles >= maxInjectionCycles) {
-              log.warn(` Max injection cycles (${maxInjectionCycles}) reached, stopping`);
-              unregisterActiveSession(conversationId);
+              log.warn(` Max injection cycles (${maxInjectionCycles}) reached (late injection), sending agent:complete and stopping`);
+              sendToRenderer('agent:complete', spaceId, conversationId, {
+                type: 'complete',
+                duration: 0,
+                tokenUsage: undefined,
+              });
+              clearInjectionsForConversation(conversationId);
               break;
             }
             log.debug(
@@ -647,11 +752,10 @@ class AgentOrchestrator extends EventEmitter {
             pendingCount: pending.size,
           });
 
-          // Wait for all pending workers to complete (up to 30 minutes, extended by worker heartbeats)
+          // Wait for all pending workers to complete (heartbeat-driven, 2-hour absolute safety limit)
           try {
             const completedTasks = await this.waitForCompletion({
               conversationId,
-              timeout: 30 * 60 * 1000, // 30 minutes base
             });
 
             // Aggregate completed results and inject as a single message
@@ -727,8 +831,18 @@ class AgentOrchestrator extends EventEmitter {
       }
 
       log.debug(` Agent ${agent.id} completed, injectionCycles: ${injectionCycles}`);
+      } finally {
+        clearInterval(heartbeatInterval);
+        // Unregister activeSessions here (not in onComplete) so that the while loop's
+        // entire lifetime — including waitForCompletion — is protected from idle cleanup.
+        unregisterActiveSession(conversationId);
+        unregisterActiveSession(childConversationId);
+      }
     } catch (error) {
+      // Catch block also unregisters in case the error occurs before the finally runs
+      // (e.g., session creation failure). Double-unregister is safe (Map.delete is idempotent).
       unregisterActiveSession(conversationId);
+      unregisterActiveSession(childConversationId);
       throw error;
     }
   }
@@ -1096,6 +1210,92 @@ class AgentOrchestrator extends EventEmitter {
         }
       }
     }
+  }
+
+  /**
+   * Interrupt all workers associated with a conversation.
+   * Called by stopGeneration and deleteSpace/deleteConversation paths.
+   * Aborts SDK sessions, disconnects remote WebSockets, fails running tasks,
+   * and clears pending announcements.
+   *
+   * Safe to call on non-HyperSpace conversations — returns silently if no team found.
+   */
+  async interruptWorkersForConversation(conversationId: string): Promise<void> {
+    const team = this.getTeamByConversation(conversationId);
+    if (!team) return;
+
+    const { activeSessions } = await import('./session-lifecycle');
+    const { v2Sessions, closeV2Session } = await import('./session-lifecycle');
+    const { getRemoteWsClient, unregisterActiveClient } =
+      await import('../remote/ws/remote-ws-client');
+
+    for (const worker of team.workers) {
+      if (worker.status !== 'running') continue;
+
+      const childConversationId = `${conversationId}:agent-${worker.id}`;
+
+      // 1. Abort local SDK session
+      const sessionState = activeSessions.get(childConversationId);
+      if (sessionState?.abortController && !sessionState.abortController.signal.aborted) {
+        sessionState.abortController.abort();
+        log.info(`[interruptWorkers] Aborted local session for ${childConversationId}`);
+      }
+
+      // 2. Interrupt V2 session
+      const v2Session = v2Sessions.get(childConversationId);
+      if (v2Session) {
+        try {
+          if (typeof (v2Session.session as unknown as { interrupt?: () => Promise<void> }).interrupt === 'function') {
+            await Promise.race([
+              (v2Session.session as unknown as { interrupt: () => Promise<void> }).interrupt(),
+              new Promise<void>((_, reject) =>
+                setTimeout(() => reject(new Error('V2 interrupt timed out')), 3000),
+              ),
+            ]);
+          }
+        } catch (e) {
+          log.error(`[interruptWorkers] Failed to interrupt V2 session ${childConversationId}:`, e);
+        }
+        closeV2Session(childConversationId);
+      }
+
+      // 3. Disconnect remote WebSocket client
+      try {
+        const remoteClient = getRemoteWsClient(childConversationId);
+        if (remoteClient) {
+          await remoteClient.interrupt(childConversationId);
+          remoteClient.disconnect();
+          unregisterActiveClient(childConversationId);
+          log.info(`[interruptWorkers] Disconnected remote client for ${childConversationId}`);
+        }
+      } catch (e) {
+        log.error(`[interruptWorkers] Failed to disconnect remote client ${childConversationId}:`, e);
+      }
+
+      // 4. Update worker status
+      worker.status = 'idle';
+      worker.currentTaskId = undefined;
+    }
+
+    // 5. Fail all running tasks for this conversation
+    for (const [taskId, task] of this.tasks) {
+      if (task.parentConversationId === conversationId && task.status === 'running') {
+        this.updateTaskStatus(taskId, 'failed', undefined, 'User cancelled');
+      }
+    }
+
+    // 6. Clear pending announcements
+    this.pendingAnnouncements.delete(conversationId);
+
+    // 7. Clear injection queue
+    try {
+      const { clearInjectionsForConversation } = await import('./stream-injection');
+      clearInjectionsForConversation(conversationId);
+    } catch (_) {
+      // stream-injection may not export clearInjectionsForConversation
+    }
+
+    log.info(`[interruptWorkers] Interrupted all workers for conversation ${conversationId}`);
   }
 
   /**
@@ -1725,6 +1925,45 @@ Respond with a JSON array of agent IDs that should handle this task.`;
   }
 
   /**
+   * Collect worker context when Leader stream is interrupted.
+   * Returns running and recently completed workers for the given conversation.
+   */
+  private collectInterruptWorkerContext(conversationId: string): InterruptWorkerContext | null {
+    const runningWorkers: InterruptWorkerContext['runningWorkers'] = [];
+    const completedWorkers: InterruptWorkerContext['completedWorkers'] = [];
+
+    const team = this.getTeamByConversation(conversationId);
+
+    for (const [taskId, task] of this.tasks) {
+      if (task.parentConversationId !== conversationId) continue;
+
+      const agent = team ? team.workers.find((w) => w.id === task.agentId) : undefined;
+      const agentName = agent?.config.name || task.agentId;
+
+      if (task.status === 'running') {
+        runningWorkers.push({
+          taskId,
+          agentId: task.agentId,
+          agentName,
+          task: task.task,
+          startedAt: task.startedAt,
+        });
+      } else if (task.status === 'completed' || task.status === 'failed') {
+        completedWorkers.push({
+          taskId,
+          agentId: task.agentId,
+          agentName,
+          result: task.result,
+          error: task.error,
+        });
+      }
+    }
+
+    if (runningWorkers.length === 0 && completedWorkers.length === 0) return null;
+    return { runningWorkers, completedWorkers };
+  }
+
+  /**
    * Wait for all pending tasks to complete.
    * Supports heartbeat extension: if any pending worker updates its heartbeat,
    * the timeout is extended, preventing premature timeout on long-running tasks.
@@ -1736,8 +1975,8 @@ Respond with a JSON array of agent IDs that should handle this task.`;
     heartbeatTimeout?: number;
     signal?: AbortSignal;
   }): Promise<SubagentTask[]> {
-    const timeout = params.timeout || 30 * 60 * 1000; // 30 minutes default (up from 5 min)
-    const heartbeatTimeout = params.heartbeatTimeout || 5 * 60 * 1000; // 5 min per-heartbeat extension
+    const absoluteMaxTimeout = params.timeout || 2 * 60 * 60 * 1000; // 2 hours hard safety limit
+    const heartbeatTimeout = params.heartbeatTimeout || 10 * 60 * 1000; // 10 min — worker must show activity
     const startTime = Date.now();
     let lastProgressTime = startTime; // Tracks last time any worker showed activity
     let cancelled = false;
@@ -1773,27 +2012,24 @@ Respond with a JSON array of agent IDs that should handle this task.`;
             const worker = this.getWorkerById(task.agentId);
             if (worker?.lastHeartbeat && worker.lastHeartbeat > lastProgressTime) {
               lastProgressTime = worker.lastHeartbeat;
-              console.debug(
-                `[Orchestrator] waitForCompletion: heartbeat from worker ${task.agentId}, ` +
-                  `extended deadline by ${heartbeatTimeout / 1000}s`,
-              );
             }
           }
         }
 
-        // Timeout: absolute OR since last heartbeat activity
         const timeSinceStart = now - startTime;
         const timeSinceProgress = now - lastProgressTime;
 
-        if (timeSinceStart > timeout) {
+        // Absolute hard safety limit (2 hours) to prevent permanent blocking due to bugs
+        if (timeSinceStart > absoluteMaxTimeout) {
           reject(
             new Error(
-              `[Orchestrator] Absolute timeout (${timeout / 1000}s) waiting for ${pending.size} subagent(s)`,
+              `[Orchestrator] Absolute safety timeout (${absoluteMaxTimeout / 1000}s) waiting for ${pending.size} subagent(s)`,
             ),
           );
           return;
         }
 
+        // Heartbeat timeout: only triggers when worker shows NO activity for 10 min
         if (timeSinceProgress > heartbeatTimeout) {
           reject(
             new Error(
@@ -1975,6 +2211,10 @@ just complete the task normally — the orchestrator will collect your results a
     const { resolveCredentialsForSdk, buildBaseSdkOptions } = await import('./sdk-config');
     const { getWorkingDir, getHeadlessElectronPath } = await import('./helpers');
     const { processStream } = await import('./stream-processor');
+    const { queueInjection } = await import('./stream-injection');
+
+    let workerHeartbeatInterval: NodeJS.Timeout | null = null;
+    let progressReportInterval: NodeJS.Timeout | null = null;
 
     try {
       const systemPrompt = this.buildSubagentPrompt(subtask, agent.config);
@@ -2022,6 +2262,7 @@ just complete the task normally — the orchestrator will collect your results a
         contextWindow: resolvedCredentials.contextWindow,
         agentId: agent.id,
         agentName: agent.config.name || agent.id,
+        allowSubagents: true,
       });
 
       sdkOptions.systemPrompt = systemPrompt;
@@ -2038,6 +2279,7 @@ just complete the task normally — the orchestrator will collect your results a
       }
 
       const sessionState = createSessionState(team.spaceId, childConversationId, abortController);
+      registerActiveSession(childConversationId, sessionState);
 
       // Notify frontend that a worker has started
       const { sendToRenderer } = await import('./helpers');
@@ -2050,23 +2292,83 @@ just complete the task normally — the orchestrator will collect your results a
         interactionMode: 'delegation',
       });
 
+      // Worker name and start time — used by both heartbeat and progress reporting
+      const workerName = agent.config.name || agent.id;
+      const workerStartTime = Date.now();
+
+      // Heartbeat: update agent.lastHeartbeat every 10s to prevent stall detection
+      // from killing this worker during long-running tasks.
+      // Also send agent:stream-alive to keep the frontend inactivity timer alive
+      // while the worker is blocked on permission approval or long tool execution.
+      workerHeartbeatInterval = setInterval(() => {
+        agent.lastHeartbeat = Date.now();
+        sendToRenderer('agent:stream-alive', team.spaceId, subtask.parentConversationId, {
+          elapsedMs: Date.now() - workerStartTime,
+          currentToolName: `worker_${workerName}`,
+        });
+      }, 10_000);
+
+      // Progress reporting: inject a summary into Leader's stream every 60s
+      // so the Leader LLM knows the worker is still active and won't send nudge messages
+      const PROGRESS_REPORT_INTERVAL_MS = 60_000;
+      let reportedThoughtCount = 0;
+
+      progressReportInterval = setInterval(() => {
+        const thoughts = sessionState.thoughts;
+        const newThoughts = thoughts.slice(reportedThoughtCount);
+        const parentConvId = subtask.parentConversationId;
+
+        if (newThoughts.length === 0) {
+          // No new tool calls — send frontend keepalive instead of injection.
+          // Injection triggers a full LLM round-trip per message, which is wasteful
+          // for "still alive" heartbeats. Frontend uses agent:stream-alive to
+          // update lastActivityAt and prevent the 30s inactivity timeout.
+          sendToRenderer('agent:stream-alive', team.spaceId, parentConvId, {
+            elapsedMs: Date.now() - workerStartTime,
+            currentToolName: `worker_${workerName}`,
+          });
+        } else {
+          const toolUses = newThoughts
+            .filter((t: Thought) => t.type === 'tool_use' && t.toolName)
+            .map((t: Thought) => t.toolName!);
+          const completedSteps = newThoughts.filter((t: Thought) => t.type === 'tool_result').length;
+          const uniqueTools = [...new Set(toolUses)];
+
+          let summary = `[Worker 进度汇报 - 无需回复] Worker "${workerName}":\n`;
+          if (uniqueTools.length > 0) {
+            summary += `- 正在使用工具: ${uniqueTools.join(', ')}\n`;
+          }
+          if (completedSteps > 0) {
+            summary += `- 已完成工具调用: ${completedSteps} 次\n`;
+          }
+          summary += `- 总处理步骤: ${thoughts.length}`;
+
+          queueInjection(parentConvId, { content: summary });
+        }
+
+        reportedThoughtCount = thoughts.length;
+      }, PROGRESS_REPORT_INTERVAL_MS);
+
       // Process stream with events forwarded to parent conversation
-      const streamResult = await processStream({
-        v2Session: session,
-        sessionState,
-        spaceId: team.spaceId,
-        conversationId: childConversationId,
-        rendererConversationId: subtask.parentConversationId, // Forward to parent UI
-        suppressComplete: true, // Don't signal parent conversation as complete
-        workerInfo: { agentId: agent.id, agentName: agent.config.name || agent.id }, // Tag events for worker panel
-        messageContent: subtask.task,
-        displayModel: resolvedCredentials.displayModel || 'claude-sonnet-4-6',
-        abortController,
-        t0: Date.now(),
-        contextWindow: resolvedCredentials.contextWindow,
-        callbacks: {
-          onComplete: (result) => {
-            // Accumulate worker thoughts into team for batch persistence
+      // Wrap with timeout to prevent indefinite blocking
+      const streamResult = await Promise.race([
+        processStream({
+          v2Session: session,
+          sessionState,
+          spaceId: team.spaceId,
+          conversationId: childConversationId,
+          rendererConversationId: subtask.parentConversationId, // Forward to parent UI
+          suppressComplete: true, // Don't signal parent conversation as complete
+          workerInfo: { agentId: agent.id, agentName: agent.config.name || agent.id }, // Tag events for worker panel
+          messageContent: subtask.task,
+          displayModel: resolvedCredentials.displayModel || 'claude-sonnet-4-6',
+          abortController,
+          t0: Date.now(),
+          contextWindow: resolvedCredentials.contextWindow,
+          callbacks: {
+            onComplete: (result) => {
+              unregisterActiveSession(childConversationId);
+              // Accumulate worker thoughts into team for batch persistence
             if (result.thoughts.length > 0) {
               team.turnThoughts.push(...result.thoughts);
             }
@@ -2086,9 +2388,36 @@ just complete the task normally — the orchestrator will collect your results a
             }
           },
         },
+        }),
+        new Promise<never>((_, reject) =>
+          setTimeout(
+            () => reject(new Error(`Worker processStream timed out after ${this.processStreamTimeout / 1000}s`)),
+            this.processStreamTimeout,
+          ),
+        ),
+      ]).catch((err: unknown) => {
+        if (err instanceof Error && err.message.includes('timed out')) {
+          console.error(`[Orchestrator] Worker ${agent.id} ${err.message}, aborting`);
+          try { abortController.abort(); } catch {}
+          unregisterActiveSession(childConversationId);
+          return {
+            finalContent: '',
+            thoughts: [],
+            tokenUsage: undefined,
+            hasPendingInjection: false,
+            interrupted: true,
+            errorThought: undefined,
+          } as unknown as Awaited<ReturnType<typeof processStream>>;
+        }
+        throw err;
       });
 
       const result = streamResult.finalContent;
+
+      // Task finished — clear progress heartbeat immediately to prevent
+      // residual injections from leaking into the Leader's stream after completion.
+      if (progressReportInterval) { clearInterval(progressReportInterval); progressReportInterval = null; }
+      if (workerHeartbeatInterval) { clearInterval(workerHeartbeatInterval); workerHeartbeatInterval = null; }
 
       // Notify frontend that worker has completed
       sendToRenderer('worker:completed', team.spaceId, subtask.parentConversationId, {
@@ -2120,6 +2449,7 @@ just complete the task normally — the orchestrator will collect your results a
       agent.status = 'idle';
       log.debug(` Local subtask ${subtask.id} completed`);
     } catch (error) {
+      unregisterActiveSession(childConversationId);
       // Notify frontend that worker has failed
       const { sendToRenderer } = await import('./helpers');
 
@@ -2150,6 +2480,9 @@ just complete the task normally — the orchestrator will collect your results a
         status: 'failed',
       });
       throw error;
+    } finally {
+      if (workerHeartbeatInterval) clearInterval(workerHeartbeatInterval);
+      if (progressReportInterval) clearInterval(progressReportInterval);
     }
   }
 
@@ -2389,7 +2722,59 @@ just complete the task normally — the orchestrator will collect your results a
       }
     });
 
+    // Progress reporting: inject a summary into Leader's stream every 60s for remote workers
+    const { queueInjection } = await import('./stream-injection');
+    const PROGRESS_REPORT_INTERVAL_MS = 60_000;
+    const remoteWorkerName = agent.config.name || agent.id;
+    const remoteWorkerStartTime = Date.now();
+    let remoteReportedThoughtCount = 0;
+    let remoteProgressInterval: NodeJS.Timeout | null = null;
+    let remoteHeartbeatInterval: NodeJS.Timeout | null = null;
+
     try {
+      // Heartbeat: keep frontend alive during permission approval wait and long tool execution.
+      // Remote workers can't rely solely on the 60s progress interval because
+      // permission approval may block for 30+ seconds with no stream events.
+      remoteHeartbeatInterval = setInterval(() => {
+        agent.lastHeartbeat = Date.now();
+        sendToRenderer('agent:stream-alive', team.spaceId, subtask.parentConversationId, {
+          elapsedMs: Date.now() - remoteWorkerStartTime,
+          currentToolName: `worker_${remoteWorkerName}`,
+        });
+      }, 10_000);
+      // Start progress reporting timer after connecting
+      remoteProgressInterval = setInterval(() => {
+        const newThoughts = thoughts.slice(remoteReportedThoughtCount);
+        const parentConvId = subtask.parentConversationId;
+
+        if (newThoughts.length === 0) {
+          // No new tool calls — send frontend keepalive instead of injection
+          sendToRenderer('agent:stream-alive', team.spaceId, parentConvId, {
+            elapsedMs: Date.now() - remoteWorkerStartTime,
+            currentToolName: `worker_${remoteWorkerName}`,
+          });
+        } else {
+          const toolUses = newThoughts
+            .filter((t: Record<string, unknown>) => (t.type === 'tool_use' || t.toolName) && t.toolName)
+            .map((t: Record<string, unknown>) => t.toolName);
+          const completedSteps = newThoughts.filter((t: Record<string, unknown>) => t.type === 'tool_result').length;
+          const uniqueTools = [...new Set(toolUses)];
+
+          let summary = `[Worker 进度汇报 - 无需回复] Worker "${remoteWorkerName}" (远程):\n`;
+          if (uniqueTools.length > 0) {
+            summary += `- 正在使用工具: ${uniqueTools.join(', ')}\n`;
+          }
+          if (completedSteps > 0) {
+            summary += `- 已完成工具调用: ${completedSteps} 次\n`;
+          }
+          summary += `- 总处理步骤: ${thoughts.length}`;
+
+          queueInjection(parentConvId, { content: summary });
+        }
+
+        remoteReportedThoughtCount = thoughts.length;
+      }, PROGRESS_REPORT_INTERVAL_MS);
+
       // Connect to remote server
       log.debug(` Connecting to remote server for subtask...`);
       await client.connect();
@@ -2434,6 +2819,11 @@ just complete the task normally — the orchestrator will collect your results a
 
       // Disconnect
       client.disconnect();
+
+      // Task finished — clear intervals immediately to prevent
+      // residual events from leaking into the Leader's stream after completion.
+      if (remoteProgressInterval) { clearInterval(remoteProgressInterval); remoteProgressInterval = null; }
+      if (remoteHeartbeatInterval) { clearInterval(remoteHeartbeatInterval); remoteHeartbeatInterval = null; }
 
       // Notify frontend that worker has completed
       sendToRenderer('worker:completed', team.spaceId, subtask.parentConversationId, {
@@ -2497,6 +2887,9 @@ just complete the task normally — the orchestrator will collect your results a
         status: 'failed',
       });
       throw error;
+    } finally {
+      if (remoteProgressInterval) clearInterval(remoteProgressInterval);
+      if (remoteHeartbeatInterval) clearInterval(remoteHeartbeatInterval);
     }
   }
 
@@ -2715,16 +3108,27 @@ just complete the task normally — the orchestrator will collect your results a
       if (agent.lastHeartbeat) {
         const timeSinceHeartbeat = now - agent.lastHeartbeat;
         if (timeSinceHeartbeat > this.stallConfig.heartbeatTimeout) {
-          isStalled = true;
-          console.warn(
-            `[Orchestrator] Task ${taskId} stalled — no heartbeat for ${Math.round(timeSinceHeartbeat / 1000)}s`,
-          );
-          this.emit('task:stalled', {
-            taskId,
-            agentId: agent.id,
-            reason: 'heartbeat_timeout',
-            elapsed: timeSinceHeartbeat,
-          });
+          // Secondary check: verify the worker session is truly inactive
+          // before marking as stalled (prevents false positives from heartbeat update lag)
+          const childConversationId = `${task.parentConversationId}:agent-${agent.id}`;
+          const sessionAlive = activeSessions.has(childConversationId);
+
+          if (!sessionAlive) {
+            isStalled = true;
+            console.warn(
+              `[Orchestrator] Task ${taskId} stalled — no heartbeat for ${Math.round(timeSinceHeartbeat / 1000)}s and session inactive`,
+            );
+            this.emit('task:stalled', {
+              taskId,
+              agentId: agent.id,
+              reason: 'heartbeat_timeout',
+              elapsed: timeSinceHeartbeat,
+            });
+          } else {
+            console.warn(
+              `[Orchestrator] Task ${taskId} heartbeat stale (${Math.round(timeSinceHeartbeat / 1000)}s) but session still active — skipping stall`,
+            );
+          }
         }
       }
 
@@ -3102,12 +3506,14 @@ just complete the task normally — the orchestrator will collect your results a
     context +=
       '11. **Use `wait_for_team` optionally** - If you want to collect all results at once before processing, use `wait_for_team`. But it is not required — results will be delivered to you automatically.\n';
     context +=
-      '12. **Workers can reach out to you** - Workers may send progress updates via `report_to_leader`, ask questions via `ask_question`, or contact other workers via `send_message`. Respond promptly when they need help.\n\n';
+      '12. **Workers can reach out to you** - Workers may send progress updates via `report_to_leader`, ask questions via `ask_question`, or contact other workers via `send_message`. Respond promptly when they need help.\n';
+    context +=
+      '13. **Workers report progress automatically** - Every 60 seconds, workers will send you a progress update showing what they are currently doing (tools being used, steps completed). You do NOT need to check on them or send reminders unless a worker has been silent for more than 3 minutes (no progress update for 3+ minutes). When you receive a progress update marked "[Worker 进度汇报 - 无需回复]", do NOT respond to it — just note that the worker is still active.\n\n';
 
     // Communication tools
     context += '### Communication Tools:\n\n';
     context += '- `spawn_subagent` - Assign a task to a worker\n';
-    context += '- `check_subagent_status` - Check task progress (use sparingly)\n';
+    context += '- `check_subagent_status` - Check task progress (use ONLY if a worker has been silent for 3+ minutes)\n';
     context += '- `list_team_members` - Get detailed team info\n';
     context += '- `send_message` - Send a message to a specific worker\n';
     context += '- `broadcast_message` - Send a message to all workers\n';
@@ -3292,19 +3698,31 @@ just complete the task normally — the orchestrator will collect your results a
       }
 
       if (announcement.result) {
-        message += `\n**Result**:\n${announcement.result}\n`;
+        message += `\n**Result**:\n${this.truncateResult(announcement.result)}\n`;
       }
     } else {
       message += `**Status**: Failed\n`;
 
       if (announcement.result) {
-        message += `**Error**: ${announcement.result}\n`;
+        message += `**Error**: ${this.truncateResult(announcement.result)}\n`;
       }
     }
 
     message += `\nTask ID: ${announcement.taskId}`;
 
     return message;
+  }
+
+  /**
+   * Truncate a worker result to MAX_RESULT_SIZE to prevent oversized injections.
+   */
+  private truncateResult(result: string): string {
+    const size = Buffer.byteLength(result, 'utf-8');
+    if (size <= MAX_RESULT_SIZE) return result;
+    console.warn(
+      `[Orchestrator] Worker result too large (${size} bytes), truncating to ${MAX_RESULT_SIZE}`,
+    );
+    return result.slice(0, MAX_RESULT_SIZE) + `\n\n[... truncated, original size: ${size} bytes]`;
   }
 
   /**
@@ -3357,7 +3775,7 @@ just complete the task normally — the orchestrator will collect your results a
    * The queued message will be picked up by processStream()'s turn-boundary
    * detection and processed in the existing while(true) loop in send-message.ts.
    */
-  private async injectMessageToSession(
+  async injectMessageToSession(
     spaceId: string,
     conversationId: string,
     message: string,

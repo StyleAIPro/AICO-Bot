@@ -38,6 +38,15 @@ export function normalizeApiUrl(apiUrl: string, provider: 'anthropic' | 'openai'
     return normalized;
   }
 
+  // Strip Anthropic-style endpoint suffixes (user may paste full URL including /v1/messages)
+  const anthropicSuffixes = ['/v1/messages', '/v1/message', '/messages', '/message'];
+  for (const suffix of anthropicSuffixes) {
+    if (normalized.endsWith(suffix)) {
+      normalized = normalized.slice(0, -suffix.length);
+      break;
+    }
+  }
+
   // Strip incomplete path suffix
   if (normalized.endsWith('/chat')) {
     normalized = normalized.slice(0, -5);
@@ -63,7 +72,8 @@ export function normalizeModelsUrl(apiUrl: string): string {
   let baseUrl = trimSlash(apiUrl);
 
   // Strip known path suffixes (aligned with normalizeApiUrl logic)
-  const suffixes = ['/chat/completions', '/completions', '/responses', '/chat'];
+  const suffixes = ['/chat/completions', '/completions', '/responses', '/chat',
+    '/v1/messages', '/v1/message', '/messages', '/message'];
   for (const suffix of suffixes) {
     if (baseUrl.endsWith(suffix)) {
       baseUrl = baseUrl.slice(0, -suffix.length);

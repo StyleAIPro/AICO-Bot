@@ -17,6 +17,7 @@
 import { is } from '@electron-toolkit/utils';
 import type { Thought, ToolCall, TokenUsage, SingleCallUsage, SessionState } from './types';
 import { sendToRenderer } from './helpers';
+import { estimateTokenCount } from '../../../shared/utils/token-estimator';
 import {
   parseSDKMessage,
   extractSingleUsage,
@@ -116,6 +117,8 @@ export interface ProcessStreamParams {
   workerInfo?: { agentId: string; agentName: string };
   /** User-configured context window size (from AI source settings). Used for accurate token usage display. */
   contextWindow?: number;
+  /** Pre-send estimated context token baseline (streaming estimation starts from this value instead of 0) */
+  estimatedContextBaseline?: number;
 }
 
 // ============================================
@@ -310,6 +313,7 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   // Token-level streaming state
   let currentStreamingText = ''; // Accumulates text_delta tokens
   let isStreamingTextBlock = false; // True when inside a text content block
+  let hadFirstStreamTextBlock = false; // Reset lastTextContent on first streaming text block to discard pre-stream text (e.g., "Set model to X" from setModel)
 
   // Track if SDK reported error_during_execution (for interrupted detection)
   let hadErrorDuringExecution = false;
@@ -323,6 +327,11 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   let hadPendingInjection = false;
   // Track if SDK detected 401 authentication_failed retry (for auto-recovery)
   let detectedAuthRetry = false;
+
+  // Local token estimation state — start from pre-send baseline instead of 0
+  let estimatedStreamingTokens = params.estimatedContextBaseline || 0;
+  let receivedApiUsage = false;
+  let lastEstimateEmitTime = 0;
 
   // Streaming block state - track active blocks by index for delta/stop correlation
   // Key: block index, Value: { type, thoughtId, content/partialJson }
@@ -429,6 +438,17 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       if (event.type === 'content_block_start' && event.content_block?.type === 'text') {
         isStreamingTextBlock = true;
         currentStreamingText = event.content_block.text || '';
+
+        // Reset pre-stream text on first streaming text block.
+        // Before stream events arrive, SDK may emit assistant messages from internal flows
+        // (e.g., "Set model to X" from setModel) that get accumulated into lastTextContent
+        // via the non-streaming fallback path (hasStreamEvent=false).
+        // Only reset on the first text block; subsequent blocks accumulate normally.
+        if (!hadFirstStreamTextBlock) {
+          lastTextContent = '';
+          hadFirstStreamTextBlock = true;
+        }
+
         const blockIndex = event.index ?? 0;
 
         // Track text block for delta correlation (same pattern as thinking/tool_use)
@@ -543,6 +563,25 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
           isComplete: false,
           isStreaming: true,
         });
+
+        // Local token estimation: accumulate streaming tokens
+        if (!receivedApiUsage) {
+          estimatedStreamingTokens += estimateTokenCount(delta);
+          const now = Date.now();
+          if (now - lastEstimateEmitTime > 500) {
+            lastEstimateEmitTime = now;
+            emit('agent:context-usage', {
+              type: 'context-usage',
+              isEstimate: true,
+              estimatedTokens: estimatedStreamingTokens,
+              inputTokens: estimatedStreamingTokens,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              contextWindow: params.contextWindow || 200000,
+            });
+          }
+        }
       }
 
       // ========== Tool use block streaming ==========
@@ -773,6 +812,7 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       if (event.type === 'message_start' && event.message?.usage) {
         const usage = event.message.usage;
         if (usage.input_tokens > 0) {
+          receivedApiUsage = true;
           lastSingleUsage = {
             inputTokens: usage.input_tokens || 0,
             outputTokens: usage.output_tokens || 0,
@@ -792,6 +832,7 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
       if (event.type === 'message_delta' && event.usage) {
         const usage = event.usage;
         if (usage.input_tokens > 0) {
+          receivedApiUsage = true;
           lastSingleUsage = {
             inputTokens: usage.input_tokens || 0,
             outputTokens: usage.output_tokens || 0,
@@ -832,6 +873,7 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
     if (sdkMessage.type === 'assistant') {
       const usage = extractSingleUsage(sdkMessage);
       if (usage) {
+        receivedApiUsage = true;
         lastSingleUsage = usage;
         emit('agent:context-usage', {
           type: 'context-usage',
@@ -929,6 +971,21 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
             result: thought.toolOutput || '',
             isError: thought.isError || false,
           });
+
+          // Accumulate tool result tokens into local estimation
+          if (!receivedApiUsage && thought.toolOutput) {
+            estimatedStreamingTokens += estimateTokenCount(thought.toolOutput);
+            emit('agent:context-usage', {
+              type: 'context-usage',
+              isEstimate: true,
+              estimatedTokens: estimatedStreamingTokens,
+              inputTokens: estimatedStreamingTokens,
+              outputTokens: 0,
+              cacheReadTokens: 0,
+              cacheCreationTokens: 0,
+              contextWindow: params.contextWindow || 200000,
+            });
+          }
 
           // Send turn-boundary event for message injection opportunity
           // This allows frontend to inject pending user messages at natural boundaries
@@ -1178,13 +1235,20 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
           subagentState.status = notifStatus === 'completed' ? 'completed' : 'failed';
           subagentState.isComplete = true;
 
+          if (notifStatus === 'failed') {
+            // Capture actual error detail for cleanup fallback (BUG-003 fix)
+            const errorDetail =
+              (msg.error as string) || (msg.summary as string) || 'Subagent task failed';
+            subagentState.lastError = errorDetail;
+          }
+
           if (!workerTag) {
             sendToRenderer('worker:completed', spaceId, rendererConvId, {
               agentId: subagentState.agentId,
               agentName: subagentState.agentName,
               taskId: notifTaskId,
               result: (msg.summary as string) || '',
-              error: notifStatus === 'failed' ? 'Subagent task failed' : undefined,
+              error: notifStatus === 'failed' ? subagentState.lastError : undefined,
               status: notifStatus === 'completed' ? ('completed' as const) : ('failed' as const),
             });
           }
@@ -1315,8 +1379,11 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   // | 6    | no         | -             | -               | yes        | -               | no               |
   // | 7    | no         | no            | no              | no         | yes             | max turns notice |
 
-  // Merge content: prefer lastTextContent (all accumulated text blocks), fallback to currentStreamingText
-  const finalContent = lastTextContent || currentStreamingText || '';
+  // Merge content: prefer lastTextContent (all accumulated text blocks), fallback to currentStreamingText,
+  // final fallback to result thought content (handles Anthropic passthrough where SSE lacks text_delta)
+  const resultThoughtContent =
+    sessionState.thoughts.find((t: Thought) => t.type === 'result')?.content || '';
+  const finalContent = lastTextContent || currentStreamingText || resultThoughtContent || '';
   const wasAborted = abortController.signal.aborted;
 
   // Finalize subagent thoughts for persistence: remove streaming state
@@ -1332,12 +1399,13 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
   // Clean up any active subagents that didn't complete (interrupted/aborted streams)
   subagentStates.forEach((state, taskId) => {
     if (!state.isComplete) {
+      const errorDetail = state.lastError || (wasAborted ? 'Stopped by user' : 'Stream interrupted');
       sendToRenderer('worker:completed', spaceId, rendererConvId, {
         agentId: state.agentId,
         agentName: state.agentName,
         taskId,
         result: '',
-        error: wasAborted ? 'Stopped by user' : 'Stream interrupted',
+        error: errorDetail,
         status: 'failed',
       });
       console.debug(`[Agent][${conversationId}] Subagent ${taskId} cleaned up (stream ended)`);
@@ -1395,26 +1463,15 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
     return result;
   }
 
-  // Always send complete event to unblock frontend
-  // (unless suppressed for worker subtasks in Hyper Space)
-  if (!params.suppressComplete) {
-    emit('agent:complete', {
-      type: 'complete',
-      duration: 0,
-      tokenUsage,
-    });
-  }
-
-  // Determine if interrupted error should be sent
+  // Send error BEFORE complete to prevent race condition:
+  // handleAgentComplete is async (awaits backend reload), and its final set()
+  // would overwrite error:null if error arrived after complete.
   const getInterruptedErrorMessage = (): string | null => {
     if (finalContent) {
-      // Has content: user aborted shows friendly message, other interrupts show warning
-      if (wasAborted) return null; // CRITICAL: Don't show error when user stops with content
+      if (wasAborted) return null;
       return isInterrupted ? 'Model response interrupted unexpectedly.' : null;
     } else {
-      // No content: skip if already has error thought or user aborted
       if (hasErrorThought || wasAborted) return null;
-      // Max turns is a graceful SDK limit, not a crash — show a clear actionable message
       if (hadMaxTurnsReached) return 'Reached the maximum turn limit. Send a message to continue.';
       return isInterrupted
         ? 'Model response interrupted unexpectedly.'
@@ -1441,6 +1498,31 @@ export async function processStream(params: ProcessStreamParams): Promise<Stream
     });
   } else if (wasAborted) {
     console.debug(`[Agent][${conversationId}] User stopped - no error sent`);
+  }
+
+  // Send final local estimation if no API usage was received
+  // This ensures the UI has a context value even for non-Anthropic models
+  if (!receivedApiUsage && !params.suppressComplete && estimatedStreamingTokens > 0) {
+    emit('agent:context-usage', {
+      type: 'context-usage',
+      isEstimate: true,
+      estimatedTokens: estimatedStreamingTokens,
+      inputTokens: estimatedStreamingTokens,
+      outputTokens: 0,
+      cacheReadTokens: 0,
+      cacheCreationTokens: 0,
+      contextWindow: params.contextWindow || 200000,
+    });
+  }
+
+  // Always send complete event to unblock frontend
+  // (unless suppressed for worker subtasks in Hyper Space)
+  if (!params.suppressComplete) {
+    emit('agent:complete', {
+      type: 'complete',
+      duration: 0,
+      tokenUsage,
+    });
   }
 
   return result;

@@ -176,7 +176,7 @@ export async function startAgent(service: RemoteDeployService, id: string): Prom
     .filter(Boolean)
     .join(' ');
 
-  const indexPath = `${deployPath}/dist/index.js`;
+  const indexPath = `${deployPath}/preflight.cjs`;
 
   console.debug(
     `[RemoteDeployService] Starting agent with env: PORT=${port}, WORK_DIR=${server.workDir || '(not set, will use per-session workDir)'}, DEPLOY_DIR=${deployPath}`,

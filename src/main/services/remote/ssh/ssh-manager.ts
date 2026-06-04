@@ -3,10 +3,11 @@
  * Handles SSH connections, command execution, and file transfers
  */
 
-import type { SFTPWrapper } from 'ssh2';
+import type { SFTPWrapper, Stats } from 'ssh2';
 import { Client as SSHClient } from 'ssh2';
 import { promisify } from 'util';
 import type { Readable, Writable } from 'stream';
+import * as fs from 'fs';
 
 export interface SSHConfig {
   host: string;
@@ -405,24 +406,106 @@ export class SSHManager {
    * Upload a file to the remote server
    */
   async uploadFile(localPath: string, remotePath: string): Promise<void> {
+    const fileSize = fs.statSync(localPath).size;
+    const CHUNKED_THRESHOLD = 10 * 1024 * 1024; // 10MB
+
+    if (fileSize > CHUNKED_THRESHOLD) {
+      console.log(`[SSHManager] Large file (${(fileSize / 1024 / 1024).toFixed(1)}MB), using chunked upload`);
+      return this.uploadFileChunked(localPath, remotePath);
+    }
+
     return this.withLock(async () => {
       await this.initSFTP();
 
       console.log(`[SSHManager] Uploading ${localPath} to ${remotePath}`);
 
       return new Promise((resolve, reject) => {
-        const fastPut = promisify(this.sftp!.fastPut);
+        // concurrency:1 avoids out-of-order writes that corrupt large files
+        this.sftp!.fastPut(
+          localPath,
+          remotePath,
+          { concurrency: 1, chunkSize: 1024 * 1024 },
+          (err) => {
+            if (err) {
+              console.error('[SSHManager] Upload error:', err);
+              reject(err);
+            } else {
+              console.log('[SSHManager] Upload completed');
+              resolve();
+            }
+          },
+        );
+      });
+    });
+  }
 
-        fastPut
-          .call(this.sftp!, localPath, remotePath)
-          .then(() => {
-            console.log(`[SSHManager] Upload completed`);
-            resolve();
-          })
-          .catch((err) => {
-            console.error('[SSHManager] Upload error:', err);
-            reject(err);
-          });
+  /**
+   * Get file stats on the remote server via SFTP.
+   */
+  async stat(remotePath: string): Promise<{ size: number; mode: number; mtime: number }> {
+    return this.withLock(async () => {
+      await this.initSFTP();
+
+      return new Promise((resolve, reject) => {
+        this.sftp!.stat(remotePath, (err: Error | undefined, stats: Stats) => {
+          if (err) {
+            reject(new Error(`SFTP stat failed for ${remotePath}: ${err.message}`));
+          } else {
+            resolve({
+              size: stats.size,
+              mode: stats.mode,
+              mtime: stats.mtime,
+            });
+          }
+        });
+      });
+    });
+  }
+
+  /**
+   * Upload a large file using chunked stream transfer.
+   * More reliable than fastPut for files > 10MB.
+   */
+  async uploadFileChunked(
+    localPath: string,
+    remotePath: string,
+    onProgress?: (transferred: number, total: number) => void,
+  ): Promise<void> {
+    return this.withLock(async () => {
+      await this.initSFTP();
+
+      const localStat = fs.statSync(localPath);
+      const totalSize = localStat.size;
+
+      return new Promise((resolve, reject) => {
+        const readStream = fs.createReadStream(localPath, { highWaterMark: 64 * 1024 });
+        const writeStream = this.sftp!.createWriteStream(remotePath, { mode: 0o644 });
+
+        let transferred = 0;
+
+        writeStream.on('close', () => {
+          console.log(`[SSHManager] Chunked upload completed: ${remotePath}`);
+          resolve();
+        });
+
+        writeStream.on('error', (err: Error) => {
+          console.error('[SSHManager] Chunked upload write error:', err);
+          readStream.destroy();
+          reject(err);
+        });
+
+        readStream.on('error', (err: Error) => {
+          console.error('[SSHManager] Chunked upload read error:', err);
+          writeStream.destroy();
+          reject(err);
+        });
+
+        readStream.on('data', (chunk: Buffer) => {
+          transferred += chunk.length;
+          onProgress?.(transferred, totalSize);
+        });
+
+        readStream.pipe(writeStream);
       });
     });
   }

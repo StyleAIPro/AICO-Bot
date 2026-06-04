@@ -334,6 +334,19 @@ export function registerApiRoutes(app: Express, mainWindow: BrowserWindow | null
         req.params.spaceId,
         req.params.conversationId,
       );
+
+      // Interrupt HyperSpace workers and destroy the team
+      try {
+        const { agentOrchestrator } = require('../../services/agent/orchestrator');
+        await agentOrchestrator.interruptWorkersForConversation(req.params.conversationId);
+        const team = agentOrchestrator.getTeamBySpace(req.params.spaceId);
+        if (team && team.conversationId === req.params.conversationId) {
+          await agentOrchestrator.destroyTeam(team.id);
+        }
+      } catch (_) {
+        // Not a HyperSpace conversation — ignore
+      }
+
       res.json(result);
     },
   );
@@ -1567,6 +1580,29 @@ export function registerApiRoutes(app: Express, mainWindow: BrowserWindow | null
   });
 
   app.post(
+    '/api/skills/import-from-archive',
+    upload.single('file'),
+    async (req: Request, res: Response) => {
+      if (!req.file) {
+        res.status(400).json({ success: false, error: 'No file uploaded' });
+        return;
+      }
+
+      try {
+        const originalName = req.file.originalname || 'upload.zip';
+        const result = await skillController.importFromArchiveBuffer(req.file.buffer, originalName);
+        res.json(result);
+      } catch (err) {
+        res.status(500).json({
+          success: false,
+          error: err instanceof Error ? err.message : 'Upload processing failed',
+        });
+      }
+    },
+  );
+
+  // 向后兼容旧路由
+  app.post(
     '/api/skills/import-from-zip',
     upload.single('file'),
     async (req: Request, res: Response) => {
@@ -1576,7 +1612,7 @@ export function registerApiRoutes(app: Express, mainWindow: BrowserWindow | null
       }
 
       try {
-        const result = await skillController.importFromZipBuffer(req.file.buffer);
+        const result = await skillController.importFromArchiveBuffer(req.file.buffer, 'upload.zip');
         res.json(result);
       } catch (err) {
         res.status(500).json({

@@ -17,8 +17,9 @@ import {
   readFileSync,
   writeFileSync,
   unlinkSync,
-  readdirSync,
   rmSync,
+  renameSync,
+  statSync,
 } from 'fs';
 import { v4 as uuidv4 } from 'uuid';
 import { getSpacesDir } from '../config.service';
@@ -32,6 +33,28 @@ import type {
 import { createEmptyMailboxFile, isProtocolMessage } from '../../../shared/types/mailbox';
 
 const log = createLogger('mailbox');
+
+// ============================================
+// Constants
+// ============================================
+
+/** Maximum message content size in bytes (100KB) */
+const MAX_MAILBOX_MESSAGE_SIZE = 100 * 1024;
+
+/** Maximum injection content size in bytes (200KB — SDK messages need more room) */
+export const MAX_INJECTION_CONTENT_SIZE = 200 * 1024;
+
+/** Maximum worker result size in bytes (50KB) */
+export const MAX_RESULT_SIZE = 50 * 1024;
+
+/** Maximum number of messages to retain in a mailbox before pruning */
+const MAX_MAILBOX_MESSAGES = 100;
+
+/** Number of retry attempts for stale file reads (detects concurrent writes) */
+const STALE_READ_RETRIES = 3;
+
+/** Delay between stale read retries (ms) */
+const STALE_READ_RETRY_DELAY = 50;
 
 // ============================================
 // Mailbox Service
@@ -102,7 +125,8 @@ export class MailboxService {
 
   /**
    * Post a message to a specific agent's mailbox.
-   * Uses atomic write-then-rename pattern.
+   * Uses atomic write-then-rename pattern with retry for concurrent write detection.
+   * Enforces message size limits and auto-prunes old messages.
    */
   postMessage(
     spaceId: string,
@@ -116,6 +140,9 @@ export class MailboxService {
       timestamp: Date.now(),
     };
 
+    // Enforce message size limit — truncate content if too large
+    this.enforceMessageSize(fullMessage);
+
     const filePath = this.getMailboxPath(spaceId, recipientId);
 
     if (!existsSync(filePath)) {
@@ -124,14 +151,10 @@ export class MailboxService {
     }
 
     try {
-      // Read current mailbox
-      const mailbox = this.readMailboxFile(filePath);
-
-      // Append new message
-      mailbox.messages.push(fullMessage);
-
-      // Write atomically (write to .tmp, then rename)
-      this.writeMailboxFileAtomic(filePath, mailbox);
+      this.writeMailboxWithRetry(filePath, (mailbox) => {
+        mailbox.messages.push(fullMessage);
+        this.pruneMessages(mailbox);
+      });
 
       log.debug(`Posted ${message.type} message to ${recipientId}: ${messageId}`);
     } catch (err) {
@@ -174,6 +197,7 @@ export class MailboxService {
    * Poll for unread messages from an agent's mailbox.
    * Returns messages after the agent's lastReadIndex cursor.
    * Updates the cursor after reading.
+   * Throws on mailbox corruption instead of silently returning empty.
    */
   pollMessages(agentId: string, spaceId: string): MailboxMessage[] {
     const filePath = this.getMailboxPath(spaceId, agentId);
@@ -182,26 +206,37 @@ export class MailboxService {
       return [];
     }
 
-    try {
-      const mailbox = this.readMailboxFile(filePath);
+    let unread: MailboxMessage[] = [];
+
+    this.writeMailboxWithRetry(filePath, (mailbox) => {
       const startIndex = mailbox.lastReadIndex + 1;
 
-      if (startIndex >= mailbox.messages.length) {
-        return []; // Nothing new
+      if (startIndex < mailbox.messages.length) {
+        unread = mailbox.messages.slice(startIndex);
+        mailbox.lastReadIndex = mailbox.messages.length - 1;
       }
+    });
 
-      // Extract unread messages
-      const unread = mailbox.messages.slice(startIndex);
-
-      // Update cursor
-      mailbox.lastReadIndex = mailbox.messages.length - 1;
-      this.writeMailboxFileAtomic(filePath, mailbox);
-
+    if (unread.length > 0) {
       log.debug(`${agentId} polled ${unread.length} new messages`);
-      return unread;
-    } catch (err) {
-      log.error(`Failed to poll messages for ${agentId}:`, err);
-      return [];
+    }
+
+    return unread;
+  }
+
+  /**
+   * Check if the mailbox file for an agent is healthy (readable + valid JSON).
+   * For use by health check mechanisms.
+   */
+  isMailboxHealthy(agentId: string, spaceId: string): boolean {
+    const filePath = this.getMailboxPath(spaceId, agentId);
+    if (!existsSync(filePath)) return true; // Not created yet — not unhealthy
+
+    try {
+      this.readMailboxFile(filePath);
+      return true;
+    } catch {
+      return false;
     }
   }
 
@@ -324,11 +359,158 @@ export class MailboxService {
   }
 
   /**
-   * Read and parse a mailbox file.
+   * Read and parse a mailbox file with error recovery.
+   * If JSON parsing fails, tries the .tmp file as a recovery source.
    */
   private readMailboxFile(filePath: string): MailboxFile {
     const raw = readFileSync(filePath, 'utf-8');
-    return JSON.parse(raw) as MailboxFile;
+    try {
+      return JSON.parse(raw) as MailboxFile;
+    } catch (parseErr) {
+      log.error(`JSON parse error for ${filePath}, attempting recovery from .tmp`);
+
+      // Try recovering from .tmp file (check old naming convention)
+      const tmpPath = `${filePath}.tmp`;
+      try {
+        if (existsSync(tmpPath)) {
+          const tmpRaw = readFileSync(tmpPath, 'utf-8');
+          const recovered = JSON.parse(tmpRaw) as MailboxFile;
+          log.info(`Recovered mailbox from .tmp file for ${filePath}`);
+          this.writeMailboxFileAtomic(filePath, recovered);
+          unlinkSync(tmpPath);
+          return recovered;
+        }
+      } catch {
+        log.error(`Recovery from .tmp also failed for ${filePath}`);
+      }
+
+      // Recovery failed — throw with context
+      throw new Error(
+        `Mailbox file corrupted (${filePath}): ${(parseErr as Error).message}. ` +
+          `Manual recovery may be needed.`,
+      );
+    }
+  }
+
+  /**
+   * Write a mailbox file atomically using rename.
+   * On NTFS, rename within the same directory is atomic.
+   */
+  private writeMailboxFileAtomic(filePath: string, mailbox: MailboxFile): void {
+    const tmpPath = `${filePath}.tmp.${Date.now()}`;
+
+    try {
+      writeFileSync(tmpPath, JSON.stringify(mailbox, null, 2), 'utf-8');
+      renameSync(tmpPath, filePath);
+    } catch (err) {
+      try {
+        if (existsSync(tmpPath)) unlinkSync(tmpPath);
+      } catch {}
+      throw err;
+    }
+  }
+
+  /**
+   * Read-modify-write with stale detection.
+   * Records the file's mtime before reading; after reading, checks if another
+   * process wrote to the file in between. If so, retries.
+   */
+  private writeMailboxWithRetry(
+    filePath: string,
+    modifier: (mailbox: MailboxFile) => void,
+  ): void {
+    for (let attempt = 0; attempt < STALE_READ_RETRIES; attempt++) {
+      const mtimeBefore = this.getFileMtime(filePath);
+      const mailbox = this.readMailboxFile(filePath);
+      const mtimeAfter = this.getFileMtime(filePath);
+
+      if (mtimeAfter !== mtimeBefore) {
+        if (attempt < STALE_READ_RETRIES - 1) {
+          log.warn(`Detected concurrent write to ${filePath}, retrying (${attempt + 1}/${STALE_READ_RETRIES})`);
+          // Brief delay to let the other writer finish
+          const start = Date.now();
+          while (Date.now() - start < STALE_READ_RETRY_DELAY) { /* spin */ }
+          continue;
+        }
+        log.warn(`Concurrent write detected on ${filePath}, proceeding with last read`);
+      }
+
+      modifier(mailbox);
+      this.writeMailboxFileAtomic(filePath, mailbox);
+      return;
+    }
+  }
+
+  /**
+   * Get file modification time, or 0 if file doesn't exist.
+   */
+  private getFileMtime(filePath: string): number {
+    try {
+      return statSync(filePath).mtimeMs;
+    } catch {
+      return 0;
+    }
+  }
+
+  /**
+   * Truncate message content if it exceeds the size limit.
+   */
+  private enforceMessageSize(message: MailboxMessage): void {
+    const contentSize = Buffer.byteLength(message.content || '', 'utf-8');
+    if (contentSize > MAX_MAILBOX_MESSAGE_SIZE) {
+      log.warn(
+        `Message to ${message.recipientId || '?'} too large (${contentSize} bytes), truncating`,
+      );
+      message.content =
+        (message.content || '').slice(0, MAX_MAILBOX_MESSAGE_SIZE) +
+        `\n\n[... truncated, original size: ${contentSize} bytes]`;
+    }
+  }
+
+  /**
+   * Prune old messages from mailbox, keeping the most recent ones.
+   * Updates lastReadIndex to avoid pointing to deleted messages.
+   */
+  private pruneMessages(mailbox: MailboxFile): void {
+    if (mailbox.messages.length <= MAX_MAILBOX_MESSAGES) return;
+
+    const pruneCount = mailbox.messages.length - MAX_MAILBOX_MESSAGES;
+    const removedStart = mailbox.messages.length - MAX_MAILBOX_MESSAGES;
+
+    log.debug(
+      `Pruning ${pruneCount} old messages from mailbox (total was ${mailbox.messages.length})`,
+    );
+
+    mailbox.messages.splice(0, pruneCount);
+
+    // Adjust cursor so it doesn't point past the new array bounds
+    // or into the deleted region
+    if (mailbox.lastReadIndex >= mailbox.messages.length) {
+      mailbox.lastReadIndex = mailbox.messages.length - 1;
+    } else if (mailbox.lastReadIndex < removedStart) {
+      // Cursor was in the deleted region — point to the first remaining message
+      mailbox.lastReadIndex = 0;
+    }
+  }
+
+  /**
+   * Manually compact a mailbox (for admin/debug use).
+   */
+  compactMailbox(agentId: string, spaceId: string): number {
+    const filePath = this.getMailboxPath(spaceId, agentId);
+    if (!existsSync(filePath)) return 0;
+
+    let prunedCount = 0;
+    this.writeMailboxWithRetry(filePath, (mailbox) => {
+      const before = mailbox.messages.length;
+      this.pruneMessages(mailbox);
+      prunedCount = before - mailbox.messages.length;
+    });
+
+    if (prunedCount > 0) {
+      log.info(`Compacted mailbox for ${agentId}: pruned ${prunedCount} messages`);
+    }
+    return prunedCount;
   }
 
   /**
@@ -338,38 +520,6 @@ export class MailboxService {
     writeFileSync(filePath, JSON.stringify(mailbox, null, 2), 'utf-8');
   }
 
-  /**
-   * Write a mailbox file atomically using write-then-rename.
-   * This is safe on NTFS and most POSIX filesystems.
-   */
-  private writeMailboxFileAtomic(filePath: string, mailbox: MailboxFile): void {
-    const tmpPath = `${filePath}.tmp`;
-
-    try {
-      // Write to temp file
-      writeFileSync(tmpPath, JSON.stringify(mailbox, null, 2), 'utf-8');
-
-      // Atomic rename (overwrites existing file)
-      writeFileSync(filePath, readFileSync(tmpPath, 'utf-8'), 'utf-8');
-
-      // Clean up temp file
-      try {
-        unlinkSync(tmpPath);
-      } catch {
-        // Ignore cleanup errors
-      }
-    } catch (err) {
-      // Clean up temp file on error
-      try {
-        if (existsSync(tmpPath)) {
-          unlinkSync(tmpPath);
-        }
-      } catch {
-        // Ignore cleanup errors
-      }
-      throw err;
-    }
-  }
 }
 
 // ============================================

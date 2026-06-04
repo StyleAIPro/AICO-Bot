@@ -505,7 +505,7 @@ You can use the following tools without requiring user approval: Read, Write, Ed
 - Don't create files unless absolutely necessary
 - Avoid over-engineering solutions
 - Be careful not to introduce security vulnerabilities
-- Do NOT proactively spawn a sub-agent (Task/Agent tool). Always perform tasks directly using the available tools (Read, Write, Edit, Grep, Glob, Bash, Skill) unless the user explicitly requests you to use a sub-agent or the Task tool. When the user explicitly asks to use a sub-agent, you MUST use the Task/Agent tool to delegate the task.
+- NEVER spawn a sub-agent (Task/Agent tool). Always perform all tasks directly using the available tools (Read, Write, Edit, Grep, Glob, Bash, Skill). No task is too complex for direct execution — including search, codebase exploration, analysis, verification, review, compilation, testing, linting, and any other operations.
 
 <env>
 Working directory: ${workDir}
@@ -990,6 +990,7 @@ export class ClaudeManager {
       extraArgs: {},
       allowedTools: [...PRE_APPROVED_TOOLS],
       // Explicitly disable WebFetch, WebSearch, Agent and Task tools
+      disallowedTools: ['WebFetch', 'WebSearch', 'Agent', 'Task'],
       includePartialMessages: true,
       maxTurns: 50,
     }
@@ -1057,27 +1058,38 @@ export class ClaudeManager {
       log.info(SCOPE.CLAUDE_MGR, `Routing via OpenAI Compat Router: ${router.baseUrl} -> ${normalizedUrl} (apiType=${apiType}, model=${effectiveModel})`)
       logConversation(`RequestHandler: OpenAI compat baseUrl=${router.baseUrl} target=${normalizedUrl} apiType=${apiType} model=${effectiveModel} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
     } else {
-      // Native Anthropic / Anthropic-compatible proxy — direct passthrough
-      // CRITICAL: Must set BOTH ANTHROPIC_API_KEY and ANTHROPIC_AUTH_TOKEN.
-      // The SDK CLI subprocess reads ANTHROPIC_API_KEY as its primary credential.
-      // Same fix as openai_compat path above (see line 915-922).
-      if (effectiveApiKey) {
-        options.env.ANTHROPIC_API_KEY = effectiveApiKey
-        options.env.ANTHROPIC_AUTH_TOKEN = effectiveApiKey
-      }
-      if (effectiveBaseUrl) {
-        // SDK appends /v1/messages to ANTHROPIC_BASE_URL automatically.
-        // Strip these suffixes if user included them to avoid duplication.
-        const baseUrl = effectiveBaseUrl.replace(/\/+$/, '')
-          .replace(/\/v\/?messages$/, '')
-          .replace(/\/v\/?message$/, '')
-          .replace(/\/messages$/, '')
-          .replace(/\/message$/, '')
-        options.env.ANTHROPIC_BASE_URL = baseUrl
-      }
-      // Use the real model name — /anthropic endpoints (DashScope, Zhipu, etc.)
-      logConversation(`RequestHandler: Anthropic passthrough baseUrl=${effectiveBaseUrl || 'default'} model=${effectiveModel || 'default'} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
-      // accept their own model names, not substituted Claude model names.
+      // Native Anthropic / Anthropic-compatible proxy — route through local OpenAI Compat Router
+      // with anthropic_passthrough apiType. This avoids SDK model validation rejecting non-Claude
+      // model names (e.g., "GLM-5.1") — the router passes the real model to the upstream API.
+      // Mirrors local AICO-Bot's resolveAnthropicPassthrough() in sdk-config.ts.
+      const router = await this.ensureRouter()
+
+      const { encodeBackendConfig } = await import('./openai-compat-router/utils/config.js')
+
+      const baseUrl = (effectiveBaseUrl || 'https://api.anthropic.com').replace(/\/+$/, '')
+      const cleanUrl = baseUrl
+        .replace(/\/v\d*\/?messages$/, '')
+        .replace(/\/v\d*\/?message$/, '')
+        .replace(/\/messages$/, '')
+        .replace(/\/message$/, '') + '/v1/messages'
+
+      const encodedConfig = encodeBackendConfig({
+        url: cleanUrl,
+        key: effectiveApiKey || '',
+        model: effectiveModel,
+        apiType: 'anthropic_passthrough',
+      })
+
+      options.env.ANTHROPIC_API_KEY = encodedConfig
+      options.env.ANTHROPIC_AUTH_TOKEN = encodedConfig
+      options.env.ANTHROPIC_BASE_URL = router.baseUrl
+
+      // Fake Claude model — SDK validates model name against internal list.
+      // The router's anthropic_passthrough handler forwards the real model to upstream.
+      options.model = 'claude-sonnet-4-6'
+
+      log.info(SCOPE.CLAUDE_MGR, `Anthropic passthrough via router: ${router.baseUrl} -> ${cleanUrl} (model=${effectiveModel})`)
+      logConversation(`RequestHandler: Anthropic passthrough via router baseUrl=${router.baseUrl} target=${cleanUrl} model=${effectiveModel || 'default'} apiKey=${effectiveApiKey ? effectiveApiKey.substring(0, 8) + '...' : '(none)'}`)
     }
 
     // Important env vars
@@ -1088,11 +1100,11 @@ export class ClaudeManager {
     options.env.CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC = '1'
 
     // Override sub-agent model to inherit parent session model.
-    // For openai_compat: set to the real model so the router replaces correctly.
-    // For anthropic: set to the configured model so sub-agents use the same model.
-    // This env var has the highest priority in SDK's Ik6() model resolution function.
+    // Both openai_compat and anthropic paths now route through the local router,
+    // which replaces the model name with the real one from the encoded config.
+    // Use the fake Claude model so SDK's model validation doesn't reject sub-agents.
     if (effectiveModel) {
-      options.env.CLAUDE_CODE_SUBAGENT_MODEL = effectiveModel
+      options.env.CLAUDE_CODE_SUBAGENT_MODEL = 'claude-sonnet-4-6'
     }
 
     // Context window: tell CLI subprocess the real context window so autocompact
@@ -1771,23 +1783,29 @@ export class ClaudeManager {
     // Build canUseTool for AskUserQuestion + destructive Bash permission support
     const isFullPermission = options.permissionMode === 'full'
 
-    // Sub-agent control: detect user intent and skill permissions
-    const lastUserMessage = [...messages].reverse().find(m => m.role === 'user') as any
-    const userRequestedSubAgent = lastUserMessage
-      ? /子\s*agent|sub[\s-]?agent|子\s*代理|创建.*任务|spawn.*agent|create.*task|用.*agent|开.*子.*agent|parallel.*task/i.test(
-          typeof lastUserMessage.content === 'string'
-            ? lastUserMessage.content
-            : Array.isArray(lastUserMessage.content)
-              ? (lastUserMessage.content as any[]).map((c: any) => c.text || '').join('')
-              : ''
-        )
-      : false
+    // Sub-agent control: only skill-based allow (removed regex user-intent detection)
     const subAgentAllowedSkills = new Set((options as any).allowSubAgentSkills || [])
     let activeSkillAllowsSubAgents = false
 
-    const canUseTool = (onAskUserQuestion || onPermissionRequest) ? async (toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) => {
+    // canUseTool is ALWAYS created — Agent/Task must be blocked even when
+    // no permission/ask callbacks are provided (SDK's disallowedTools is
+    // ineffective for the Agent tool which is managed by agentDefinitions).
+    const canUseTool = async (toolName: string, input: Record<string, unknown>, opts: { signal: AbortSignal }) => {
       // [DIAG-1.5] Log every canUseTool invocation
       log.debug(SCOPE.CLAUDE_MGR, `canUseTool INVOKED: toolName=${toolName}, input=${JSON.stringify(input).substring(0, 200)}`)
+
+      // Agent/Task: always deny unless active skill explicitly requires it
+      if (toolName === 'Agent' || toolName === 'Task') {
+        if (activeSkillAllowsSubAgents) {
+          log.info(SCOPE.CLAUDE_MGR, `${toolName} auto-allowed: active skill requires sub-agents`)
+          return { behavior: 'allow' as const, updatedInput: input }
+        }
+        log.info(SCOPE.CLAUDE_MGR, `${toolName} denied: sub-agents blocked for non-Worker sessions`)
+        return {
+          behavior: 'deny' as const,
+          message: 'Sub-agent creation is not allowed. Please complete the task directly using available tools (Read, Write, Edit, Grep, Glob, Bash, Skill).',
+        }
+      }
 
       // AskUserQuestion: forward to AICO-Bot client
       if (toolName === 'AskUserQuestion' && onAskUserQuestion) {
@@ -1853,26 +1871,9 @@ export class ClaudeManager {
         }
       }
 
-      // Agent/Task: only allow if user explicitly requested or active skill requires it
-      if (toolName === 'Agent' || toolName === 'Task') {
-        if (userRequestedSubAgent) {
-          log.info(SCOPE.CLAUDE_MGR, `${toolName} auto-allowed: user explicitly requested sub-agent`)
-          return { behavior: 'allow' as const, updatedInput: input }
-        }
-        if (activeSkillAllowsSubAgents) {
-          log.info(SCOPE.CLAUDE_MGR, `${toolName} auto-allowed: active skill requires sub-agents`)
-          return { behavior: 'allow' as const, updatedInput: input }
-        }
-        log.info(SCOPE.CLAUDE_MGR, `${toolName} denied: user did not request and no skill requires it`)
-        return {
-          behavior: 'deny' as const,
-          message: 'Sub-agent creation is not allowed unless explicitly requested by the user or the current skill requires it. Please complete the task directly using available tools.',
-        }
-      }
-
       // All other tools: auto-allow
       return { behavior: 'allow' as const, updatedInput: input }
-    } : undefined
+    }
 
     // [DIAG-1.1] Log canUseTool creation and type
     log.debug(SCOPE.CLAUDE_MGR, `[${shortId(sessionId)}] canUseTool callback: ${typeof canUseTool}, hasPermissionRequest=${!!onPermissionRequest}, hasAskUserQuestion=${!!onAskUserQuestion}`)
@@ -3180,6 +3181,7 @@ export class ClaudeManager {
       permissionMode: 'bypassPermissions',
       extraArgs: { 'dangerously-skip-permissions': null },
       allowedTools: [...PRE_APPROVED_TOOLS],
+      disallowedTools: ['WebFetch', 'WebSearch', 'Agent', 'Task'],
       includePartialMessages: true,
       maxTurns: 10,  // App runs should be focused, fewer turns
       ...(options.contextWindow ? { modelContextWindow: options.contextWindow } : this.contextWindow ? { modelContextWindow: this.contextWindow } : {}),
@@ -3199,6 +3201,18 @@ export class ClaudeManager {
         }
         sdkOptions.mcpServers[name] = config
       }
+    }
+
+    // Block Agent/Task tools at canUseTool level (belt-and-suspenders with disallowedTools)
+    sdkOptions.canUseTool = async (toolName: string, input: Record<string, unknown>) => {
+      if (toolName === 'Agent' || toolName === 'Task') {
+        log.info(SCOPE.CLAUDE_MGR, `[App] ${toolName} denied: sub-agents blocked`)
+        return {
+          behavior: 'deny' as const,
+          message: 'Sub-agent creation is not allowed. Please complete the task directly using available tools.',
+        }
+      }
+      return { behavior: 'allow' as const, updatedInput: input }
     }
 
     // Create a fresh session for this app run

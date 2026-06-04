@@ -610,7 +610,7 @@ export async function installSkillFromYaml(
  * 从文件路径导入技能（支持 ZIP 和文件夹）
  */
 export async function importSkills(
-  sourceType: 'zip' | 'folder',
+  sourceType: 'archive' | 'folder',
   filePath: string,
   onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
 ): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
@@ -625,9 +625,9 @@ export async function importSkills(
     };
 
     let result: ImportSkillsResult;
-    if (sourceType === 'zip') {
-      console.log('[Controller:importSkills] calling installFromZip...');
-      result = await skillManager.installFromZip(filePath, onProgress);
+    if (sourceType === 'archive') {
+      console.log('[Controller:importSkills] calling installFromArchive...');
+      result = await skillManager.installFromArchive(filePath, onProgress);
     } else {
       console.log('[Controller:importSkills] calling installFromDirectory...');
       result = await skillManager.installFromDirectory(filePath, onProgress);
@@ -647,21 +647,23 @@ export async function importSkills(
 }
 
 /**
- * 从 ZIP Buffer 导入技能（用于 HTTP 上传）
+ * 从压缩包 Buffer 导入技能（用于 HTTP 上传）
  */
-export async function importFromZipBuffer(
-  zipBuffer: Buffer,
+export async function importFromArchiveBuffer(
+  archiveBuffer: Buffer,
+  originalFileName: string,
   onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
 ): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
   try {
     await ensureInitialized();
     const skillManager = SkillManager.getInstance();
 
-    const tmpFile = path.join(os.tmpdir(), `aico-skill-upload-${crypto.randomUUID()}.zip`);
-    await fs.writeFile(tmpFile, zipBuffer);
+    const ext = path.extname(originalFileName).toLowerCase();
+    const tmpFile = path.join(os.tmpdir(), `aico-skill-upload-${crypto.randomUUID()}${ext}`);
+    await fs.writeFile(tmpFile, archiveBuffer);
 
     try {
-      const result = await skillManager.installFromZip(tmpFile, (message) => {
+      const result = await skillManager.installFromArchive(tmpFile, (message) => {
         onOutput?.({ type: 'stdout', content: message });
       });
 
@@ -677,6 +679,16 @@ export async function importFromZipBuffer(
       error: err instanceof Error ? err.message : 'Unknown error',
     };
   }
+}
+
+/**
+ * @deprecated Use importFromArchiveBuffer instead
+ */
+export async function importFromZipBuffer(
+  zipBuffer: Buffer,
+  onOutput?: (data: { type: 'stdout' | 'stderr' | 'complete' | 'error'; content: string }) => void,
+): Promise<{ success: boolean; data?: ImportSkillsResult; error?: string }> {
+  return importFromArchiveBuffer(zipBuffer, 'upload.zip', onOutput);
 }
 
 export async function uninstallSkill(skillId: string) {

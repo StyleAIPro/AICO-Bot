@@ -104,6 +104,29 @@
 
 | 严重程度 | 数量 |
 |---------|------|
-| Critical | 5 |
+| Critical | 6 |
 | Major | 0 |
 | Minor | 0 |
+
+---
+
+## BUG-007: SDK disallowedTools 对 Agent 工具无效导致子 Agent 乱创建
+
+- **日期**：2026-05-30
+- **严重程度**：Critical
+- **发现人**：@misakamikoto
+- **问题**：v4 通过 `disallowedTools: ['Agent', 'Task']` 尝试禁止子 Agent 创建，但 Agent 工具仍被模型调用。本地、远程、普通对话和 Hyper Space Leader 均受影响。
+- **根因**：
+  1. SDK 的 `disallowedTools` 只影响权限上下文，不影响 Agent 工具的实际 schema 呈现（Agent 由 `agentDefinitions` 子系统管理，独立于常规工具列表）
+  2. `permission-handler.ts` 的 `createCanUseTool()` 无 Agent/Task 检查，走到 "All other tools: auto-allow" 分支
+  3. 远程代理 `buildSdkOptions` 有注释 "disable Agent" 但无实际 `disallowedTools` 属性
+  4. 远程代理 `canUseTool` 仅在 `onAskUserQuestion || onPermissionRequest` 存在时创建，两者都不存在时 Agent/Task 无任何拦截
+- **修复**：
+  1. `permission-handler.ts`：`createCanUseTool` 顶部添加 Agent/Task 拦截，新增 `allowSubagents` 参数控制
+  2. `sdk-config.ts`：`BaseSdkOptionsParams` 添加 `allowSubagents` 并传递给 `createCanUseTool`
+  3. `send-message-local.ts` / `session-lifecycle.ts`：传递 `allowSubagents: false`
+  4. `orchestrator.ts`：Leader 传 `allowSubagents: false`，Worker 传 `allowSubagents: true`
+  5. `claude-manager.ts`：添加 `disallowedTools: ['Agent', 'Task']`；`canUseTool` 改为始终创建（Agent/Task 拦截优先于其他逻辑）；`streamChatForApp` 添加 `canUseTool` 拦截
+- **PRD**：`.project/prd/bugfix/agent/bugfix-excessive-subagents-v5.md`
+- **影响文档**：
+  - [x] changelog.md

@@ -14,6 +14,7 @@ import { existsSync, createReadStream, createWriteStream, mkdirSync } from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
 import * as yauzl from 'yauzl';
+import decompress from 'decompress';
 import { parse as parseYaml, stringify as stringifyYaml } from 'yaml';
 import type {
   SkillSpec,
@@ -872,6 +873,96 @@ export class SkillManager {
       const msg = err instanceof Error ? err.message : String(err);
       console.error('[SkillManager:installFromZip] failed:', msg, err);
       return { installed: [], skipped: [], errors: [`ZIP processing failed: ${msg}`] };
+    }
+  }
+
+  private getArchiveType(fileName: string): 'zip' | 'tar.gz' | 'tgz' | 'tar.bz2' | 'tar.xz' | 'rar' | '7z' | 'unknown' {
+    const lower = fileName.toLowerCase();
+    if (lower.endsWith('.tar.gz') || lower.endsWith('.tar.gzip')) return 'tar.gz';
+    if (lower.endsWith('.tgz')) return 'tgz';
+    if (lower.endsWith('.tar.bz2')) return 'tar.bz2';
+    if (lower.endsWith('.tar.xz')) return 'tar.xz';
+    if (lower.endsWith('.zip')) return 'zip';
+    if (lower.endsWith('.rar')) return 'rar';
+    if (lower.endsWith('.7z')) return '7z';
+    return 'unknown';
+  }
+
+  async installFromArchive(
+    filePath: string,
+    onProgress?: (message: string) => void,
+  ): Promise<ImportSkillsResult> {
+    const fileName = path.basename(filePath);
+    const archiveType = this.getArchiveType(fileName);
+
+    if (archiveType === 'rar' || archiveType === '7z') {
+      const ext = archiveType;
+      return {
+        installed: [],
+        skipped: [],
+        errors: [`Unsupported archive format: ${ext}. Please use zip, tar.gz, tgz, tar.bz2, or tar.xz.`],
+      };
+    }
+
+    if (archiveType === 'unknown') {
+      return {
+        installed: [],
+        skipped: [],
+        errors: [`Unsupported archive format: ${path.extname(fileName)}. Please use zip, tar.gz, tgz, tar.bz2, or tar.xz.`],
+      };
+    }
+
+    // zip 走已有的 yauzl 流式解压（更高效）
+    if (archiveType === 'zip') {
+      return this.installFromZip(filePath, onProgress);
+    }
+
+    console.log('[SkillManager:installFromArchive] filePath:', filePath, 'type:', archiveType);
+    const result: ImportSkillsResult = { installed: [], skipped: [], errors: [] };
+    const targetDir = this.skillsDirs[0];
+    const tmpDir = path.join(os.tmpdir(), `aico-skill-extract-${crypto.randomUUID()}`);
+
+    onProgress?.(`Extracting archive: ${fileName}...`);
+
+    try {
+      await decompress(filePath, tmpDir);
+
+      const skillDirs = await this.findSkillDirs(tmpDir, 3);
+      console.log('[SkillManager:installFromArchive] found skills:', skillDirs.map(s => s.skillName));
+
+      if (skillDirs.length === 0) {
+        result.errors.push('No directories containing SKILL.md found in archive');
+        return result;
+      }
+
+      for (const { skillName, srcPath } of skillDirs) {
+        const destPath = path.join(targetDir, skillName);
+        try {
+          if (existsSync(destPath)) {
+            await fs.rm(destPath, { recursive: true, force: true });
+          }
+          await this.copyDirRecursive(srcPath, destPath);
+          result.installed.push(skillName);
+          onProgress?.(`Installed: ${skillName}`);
+        } catch (err) {
+          const msg = err instanceof Error ? err.message : String(err);
+          result.errors.push(`${skillName}: ${msg}`);
+          onProgress?.(`Failed: ${skillName} - ${msg}`);
+        }
+      }
+
+      await this.refresh();
+      onProgress?.(
+        `Done. Installed: ${result.installed.length}, Skipped: ${result.skipped.length}, Errors: ${result.errors.length}`,
+      );
+
+      return result;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      console.error('[SkillManager:installFromArchive] failed:', msg, err);
+      return { installed: [], skipped: [], errors: [`Archive processing failed: ${msg}`] };
+    } finally {
+      await fs.rm(tmpDir, { recursive: true, force: true }).catch(() => {});
     }
   }
 

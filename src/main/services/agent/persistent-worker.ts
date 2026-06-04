@@ -141,6 +141,8 @@ export class PersistentWorkerLoop {
   private async mainLoop(): Promise<void> {
     const pollInterval = this.config.pollInterval || DEFAULT_POLL_INTERVAL;
     const autoClaim = this.config.autoClaimTasks !== false; // default true
+    let healthCheckCounter = 0;
+    const HEALTH_CHECK_INTERVAL = 10; // Check mailbox health every N poll cycles (~30s)
 
     // Send initial idle notification
     this.notifyIdle('available');
@@ -148,7 +150,28 @@ export class PersistentWorkerLoop {
     while (!this.shutdownRequested) {
       try {
         // Step 1: Poll mailbox for new messages
-        const messages = mailboxService.pollMessages(this.agent.id, this.team.spaceId);
+        let messages: MailboxMessage[] = [];
+        try {
+          messages = mailboxService.pollMessages(this.agent.id, this.team.spaceId);
+        } catch (pollErr) {
+          log.error(
+            `Worker ${this.agent.id}: mailbox poll failed, may be corrupted`,
+            pollErr,
+          );
+          // Continue loop — don't crash the worker on mailbox errors
+        }
+
+        // Step 1b: Periodic mailbox health check
+        healthCheckCounter++;
+        if (healthCheckCounter >= HEALTH_CHECK_INTERVAL) {
+          healthCheckCounter = 0;
+          if (!mailboxService.isMailboxHealthy(this.agent.id, this.team.spaceId)) {
+            log.error(
+              `Worker ${this.agent.id}: mailbox file is corrupted! ` +
+                `Messages may be lost. Manual intervention may be required.`,
+            );
+          }
+        }
 
         if (messages.length > 0) {
           // Process each message

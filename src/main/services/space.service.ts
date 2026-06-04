@@ -558,6 +558,18 @@ export async function deleteSpace(spaceId: string): Promise<{ success: boolean; 
   // Windows releases all file handles on the space directory.
   await closeSessionsBySpaceId(spaceId);
 
+  // Destroy HyperSpace team and interrupt all workers for this space
+  try {
+    const { agentOrchestrator } = require('./agent/orchestrator');
+    const team = agentOrchestrator.getTeamBySpace(spaceId);
+    if (team) {
+      await agentOrchestrator.interruptWorkersForConversation(team.conversationId);
+      await agentOrchestrator.destroyTeam(team.id);
+    }
+  } catch (e) {
+    console.error(`[Space] Failed to destroy HyperSpace team for ${spaceId}:`, e);
+  }
+
   // Stop file watcher to release directory handles (Windows EBUSY fix)
   await destroySpaceCache(spaceId);
 

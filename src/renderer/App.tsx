@@ -284,7 +284,6 @@ export default function App() {
 
     // Message events (with session IDs)
     const unsubMessage = api.onAgentMessage((data) => {
-      console.log('[App] Received agent:message event:', data);
       handleAgentMessage(data as AgentEventBase & { content: string; isComplete: boolean });
     });
 
@@ -452,6 +451,34 @@ export default function App() {
       }
     });
 
+    // Interrupt context - worker state when Leader stream is interrupted
+    const unsubInterruptContext = api.onAgentInterruptContext((data) => {
+      const event = data as AgentEventBase & {
+        runningWorkers: Array<{
+          taskId: string;
+          agentId: string;
+          agentName: string;
+          task: string;
+          startedAt?: number;
+        }>;
+        completedWorkers: Array<{
+          taskId: string;
+          agentId: string;
+          agentName: string;
+          result?: string;
+          error?: string;
+        }>;
+      };
+      console.log(
+        `[App] Received agent:interrupt-context for ${event.conversationId}: ` +
+          `${event.runningWorkers.length} running, ${event.completedWorkers.length} completed`,
+      );
+      useChatStore.getState().handleInterruptContext(event.conversationId, {
+        runningWorkers: event.runningWorkers,
+        completedWorkers: event.completedWorkers,
+      });
+    });
+
     // Worker lifecycle events (Hyper Space)
     const unsubWorkerStarted = api.onWorkerStarted((data) => {
       console.log('[App] Received worker:started event:', data);
@@ -482,6 +509,7 @@ export default function App() {
       unsubTeamMessage();
       unsubTurnBoundary();
       unsubInjectionStart();
+      unsubInterruptContext();
       unsubWorkerStarted();
       unsubWorkerCompleted();
     };
