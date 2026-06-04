@@ -261,14 +261,27 @@ async function resolveAnthropicPassthrough(
     useProxy: credentials.useProxy,
   });
 
-  console.log(`[SDK Config] Anthropic passthrough: routing via ${router.baseUrl}`);
+  // Check if upstream is the actual Anthropic API or a direct proxy.
+  // For internal/custom models that happen to serve /v1/messages, use a compat
+  // model name so the SDK enables extended thinking (the SDK only enables thinking
+  // for models it recognizes; custom model names aren't in its internal database).
+  // The router's passthrough handler overrides the model before forwarding upstream,
+  // so the real model name is preserved in the actual API request.
+  const isActualAnthropicApi =
+    baseUrl.includes('api.anthropic.com') || baseUrl.includes('/anthropic');
+  const useCompatModel = !isActualAnthropicApi;
+
+  console.log(
+    `[SDK Config] Anthropic passthrough: routing via ${router.baseUrl}${useCompatModel ? ' (compat model for thinking support)' : ''}`,
+  );
 
   return {
     anthropicBaseUrl: router.baseUrl,
     anthropicApiKey,
-    sdkModel: credentials.model || 'claude-opus-4-5-20251101',
+    sdkModel: useCompatModel ? 'claude-sonnet-4-6' : (credentials.model || 'claude-opus-4-5-20251101'),
     displayModel: credentials.displayModel || credentials.model,
     contextWindow: credentials.contextWindow,
+    isCompatModel: useCompatModel ? true : undefined,
   };
 }
 
