@@ -155,7 +155,10 @@ export async function resolveCredentialsForSdk(
   // Mirrors remote ClaudeManager.detectBackendType() logic
   const isNativeAnthropic = detectNativeAnthropic(credentials.baseUrl);
 
-  if (credentials.provider === 'anthropic' && isNativeAnthropic) {
+  // Route based on URL format, not provider label — OAuth/OpenAI providers may
+  // point to Anthropic-format endpoints (e.g. /v1/messages). The URL is the
+  // authoritative signal for which wire format the upstream speaks.
+  if (isNativeAnthropic) {
     // Native Anthropic — passthrough with zero conversion
     if (PROXY_ANTHROPIC) {
       return resolveAnthropicPassthrough(credentials);
