@@ -1506,7 +1506,7 @@
     loupe "^2.3.7"
     pretty-format "^29.7.0"
 
-"@xmldom/xmldom@^0.8.8":
+"@xmldom/xmldom@^0.8.6", "@xmldom/xmldom@^0.8.8":
   version "0.8.11"
   resolved "https://registry.npmmirror.com/@xmldom/xmldom/-/xmldom-0.8.11.tgz"
   integrity sha512-cQzWCtO6C8TQiYl1ruKNn2U6Ao4o4WBBcbL61yJl84x+j5sOWWFU9X7DpND8XZG3daDppSsigMdfAIl2upQBRw==
@@ -1718,6 +1718,13 @@ argparse@^2.0.1:
   resolved "https://registry.npmmirror.com/argparse/-/argparse-2.0.1.tgz"
   integrity sha512-8+9WqebbFzpX9OR+Wa6O29asIogeRMzcGtAINdpMHHyAg10f05aSFVBbcEqGf/PXw1EjAZ+q2/bEBg3DvurK3Q==
 
+argparse@~1.0.3:
+  version "1.0.10"
+  resolved "https://registry.npmmirror.com/argparse/-/argparse-1.0.10.tgz"
+  integrity sha512-o5Roy6tNG4SL/FOkCAN6RzjiakZS25RLYFrcMttJqbdd8BWrnA+fGz57iN5Pb06pvBGvl5gQ0B48dJlslXvoTg==
+  dependencies:
+    sprintf-js "~1.0.2"
+
 asn1@^0.2.6:
   version "0.2.6"
   resolved "https://registry.npmjs.org/asn1/-/asn1-0.2.6.tgz"
@@ -1857,6 +1864,11 @@ bluebird@^3.5.5:
   version "3.7.2"
   resolved "https://registry.npmmirror.com/bluebird/-/bluebird-3.7.2.tgz"
   integrity sha512-XpNj6GDQzdfW+r2Wnn7xiSAd7TM3jzkxGXBGTtWKuSXv1xUV+azxAm8jdWZN06QTQk+2N2XB9jRDkvbmQmcRtg==
+
+bluebird@~3.4.0:
+  version "3.4.7"
+  resolved "https://registry.npmmirror.com/bluebird/-/bluebird-3.4.7.tgz"
+  integrity sha512-iD3898SR7sWVRHbiQv+sHUtHnMvC1o3nW5rAcqnq3uOn07DSAppZYUkIGslDz6gXC7HfunPe7YVBgoEJASPcHA==
 
 body-parser@^2.2.1:
   version "2.2.1"
@@ -2656,6 +2668,11 @@ dijkstrajs@^1.0.1:
   resolved "https://registry.npmmirror.com/dijkstrajs/-/dijkstrajs-1.0.3.tgz"
   integrity sha512-qiSlmBq9+BCdCA/L46dw8Uy93mloxsPSbwnm5yrKn2vMPiy8KyAskTF6zuV/j5BMsmOGZDPs7KjU+mjb670kfA==
 
+dingbat-to-unicode@^1.0.1:
+  version "1.0.1"
+  resolved "https://registry.npmmirror.com/dingbat-to-unicode/-/dingbat-to-unicode-1.0.1.tgz"
+  integrity sha512-98l0sW87ZT58pU4i61wa2OHwxbiYSbuxsCBozaVnYX2iCnr3bLM3fIes1/ej7h1YdOKuKt/MLs706TVnALA65w==
+
 dir-compare@^3.0.0:
   version "3.3.0"
   resolved "https://registry.npmmirror.com/dir-compare/-/dir-compare-3.3.0.tgz"
@@ -2736,6 +2753,13 @@ dotenv@^9.0.2:
   version "9.0.2"
   resolved "https://registry.npmmirror.com/dotenv/-/dotenv-9.0.2.tgz"
   integrity sha512-I9OvvrHp4pIARv4+x9iuewrWycX6CcZtoAu1XrzPxc5UygMJXJZYmBsynku8IkrJwgypE5DGNjDPmPRhDCptUg==
+
+duck@^0.1.12:
+  version "0.1.12"
+  resolved "https://registry.npmmirror.com/duck/-/duck-0.1.12.tgz"
+  integrity sha512-wkctla1O6VfP89gQ+J/yDesM0S7B7XLXjKGzXxMDVFg7uEn706niAtyYovKbyq1oT9YwDcly721/iUWoc8MVRg==
+  dependencies:
+    underscore "^1.13.1"
 
 dunder-proto@^1.0.1:
   version "1.0.1"
@@ -4007,6 +4031,11 @@ ignore@^7.0.5:
   resolved "https://registry.npmmirror.com/ignore/-/ignore-7.0.5.tgz"
   integrity sha512-Hs59xBNfUIunMFgWAbGX5cq6893IbWg4KnrjbYwX3tx0ztorVgTDA6B2sxf8ejHJ4wz8BqGUMYlnzNBer5NvGg==
 
+immediate@~3.0.5:
+  version "3.0.6"
+  resolved "https://registry.npmmirror.com/immediate/-/immediate-3.0.6.tgz"
+  integrity sha512-XXOFtyqDjNDAQxVfYxuF7g9Il/IbWmmlQg2MYKOH8ExIT1qg6xc4zyS3HaEEATgs1btfzxq15ciUiY7gjSXRGQ==
+
 import-fresh@^3.2.1:
   version "3.3.1"
   resolved "https://registry.npmmirror.com/import-fresh/-/import-fresh-3.3.1.tgz"
@@ -4346,6 +4375,16 @@ jsonify@^0.0.1:
   resolved "https://registry.npmmirror.com/jsonify/-/jsonify-0.0.1.tgz"
   integrity sha512-2/Ki0GcmuqSrgFyelQq9M05y7PS0mEwuIzrf3f1fPqkVDVRvZrPZtVSMHxdgo8Aq0sxAOb/cr2aqqA3LeWHVPg==
 
+jszip@^3.7.1:
+  version "3.10.1"
+  resolved "https://registry.npmmirror.com/jszip/-/jszip-3.10.1.tgz"
+  integrity sha512-xXDvecyTpGLrqFrvkrUSoxxfJI5AH7U8zxxtVclpsUtMCq4JQ290LY8AW5c7Ggnr/Y/oK+bQMbqK2qmtk3pN4g==
+  dependencies:
+    lie "~3.3.0"
+    pako "~1.0.2"
+    readable-stream "~2.3.6"
+    setimmediate "^1.0.5"
+
 katex@^0.16.0, katex@^0.16.27, katex@^0.16.47:
   version "0.16.47"
   resolved "https://registry.npmmirror.com/katex/-/katex-0.16.47.tgz"
@@ -4381,6 +4420,13 @@ lead@^4.0.0:
   version "4.0.0"
   resolved "https://registry.npmmirror.com/lead/-/lead-4.0.0.tgz"
   integrity sha512-DpMa59o5uGUWWjruMp71e6knmwKU3jRBBn1kjuLWN9EeIOxNeSAwvHf03WIl8g/ZMR2oSQC9ej3yeLBwdDc/pg==
+
+lie@~3.3.0:
+  version "3.3.0"
+  resolved "https://registry.npmmirror.com/lie/-/lie-3.3.0.tgz"
+  integrity sha512-UaiMJzeWRlEujzAuw5LokY1L5ecNQYZKfmyZ9L7wDHb/p5etKaxXhohBcrw0EYby+G/NA52vRSN4N39dxHAIwQ==
+  dependencies:
+    immediate "~3.0.5"
 
 lilconfig@^3.1.1, lilconfig@^3.1.3:
   version "3.1.3"
@@ -4441,6 +4487,15 @@ loose-envify@^1.1.0, loose-envify@^1.4.0:
   integrity sha512-lyuxPGr/Wfhrlem2CL/UcnUc1zcqKAImBDzukY7Y5F/yQiNdko6+fRLevlw1HgMySw7f611UIY408EtxRSoK3Q==
   dependencies:
     js-tokens "^3.0.0 || ^4.0.0"
+
+lop@^0.4.2:
+  version "0.4.2"
+  resolved "https://registry.npmmirror.com/lop/-/lop-0.4.2.tgz"
+  integrity sha512-RefILVDQ4DKoRZsJ4Pj22TxE3omDO47yFpkIBoDKzkqPRISs5U1cnAdg/5583YPkWPaLIYHOKRMQSvjFsO26cw==
+  dependencies:
+    duck "^0.1.12"
+    option "~0.2.1"
+    underscore "^1.13.1"
 
 loupe@^2.3.6, loupe@^2.3.7:
   version "2.3.7"
@@ -4520,6 +4575,22 @@ make-fetch-happen@^10.2.1:
     promise-retry "^2.0.1"
     socks-proxy-agent "^7.0.0"
     ssri "^9.0.0"
+
+mammoth@^1.12.0:
+  version "1.12.0"
+  resolved "https://registry.npmmirror.com/mammoth/-/mammoth-1.12.0.tgz"
+  integrity sha512-cwnK1RIcRdDMi2HRx2EXGYlxqIEh0Oo3bLhorgnsVJi2UkbX1+jKxuBNR9PC5+JaX7EkmJxFPmo6mjLpqShI2w==
+  dependencies:
+    "@xmldom/xmldom" "^0.8.6"
+    argparse "~1.0.3"
+    base64-js "^1.5.1"
+    bluebird "~3.4.0"
+    dingbat-to-unicode "^1.0.1"
+    jszip "^3.7.1"
+    lop "^0.4.2"
+    path-is-absolute "^1.0.0"
+    underscore "^1.13.1"
+    xmlbuilder "^10.0.0"
 
 markdown-table@^3.0.0:
   version "3.0.4"
@@ -5466,6 +5537,11 @@ open@^7.4.2:
     is-docker "^2.0.0"
     is-wsl "^2.1.1"
 
+option@~0.2.1:
+  version "0.2.4"
+  resolved "https://registry.npmmirror.com/option/-/option-0.2.4.tgz"
+  integrity sha512-pkEqbDyl8ou5cpq+VsnQbe/WlEy5qS7xPzMS1U55OCG9KPvwFD46zDbxQIj3egJSFc3D+XhYOPUzz49zQAVy7A==
+
 ora@^5.1.0:
   version "5.4.1"
   resolved "https://registry.npmmirror.com/ora/-/ora-5.4.1.tgz"
@@ -5523,6 +5599,11 @@ package-json-from-dist@^1.0.0:
   version "1.0.1"
   resolved "https://registry.npmmirror.com/package-json-from-dist/-/package-json-from-dist-1.0.1.tgz"
   integrity sha512-UEZIS3/by4OC8vL3P2dTXRETpebLI2NiI5vIrjaD/5UtrkFX/tNbwjTSRAGC/+7CAo2pIcBaRgWmcBBHcsaCIw==
+
+pako@~1.0.2:
+  version "1.0.11"
+  resolved "https://registry.npmmirror.com/pako/-/pako-1.0.11.tgz"
+  integrity sha512-4hLB8Py4zZce5s4yd9XzopqwVv/yGNhV1Bl8NTmCq1763HeK2+EwVTv+leGeL13Dnh2wfbqowVPXCIO0z4taYw==
 
 parent-module@^1.0.0:
   version "1.0.1"
@@ -6555,6 +6636,11 @@ set-function-length@^1.2.2:
     gopd "^1.0.1"
     has-property-descriptors "^1.0.2"
 
+setimmediate@^1.0.5:
+  version "1.0.5"
+  resolved "https://registry.npmmirror.com/setimmediate/-/setimmediate-1.0.5.tgz"
+  integrity sha512-MATJdZp8sLqDl/68LfQmbP8zKPLQNV6BIZoIgrscFDQ+RsvK/BxeDQOgyxKKoh0y/8h3BqVFnCqQ/gd+reiIXA==
+
 setprototypeof@~1.2.0:
   version "1.2.0"
   resolved "https://registry.npmmirror.com/setprototypeof/-/setprototypeof-1.2.0.tgz"
@@ -6749,6 +6835,11 @@ sprintf-js@^1.1.1, sprintf-js@^1.1.2:
   version "1.1.3"
   resolved "https://registry.npmmirror.com/sprintf-js/-/sprintf-js-1.1.3.tgz"
   integrity sha512-Oo+0REFV59/rz3gfJNKQiBlwfHaSESl1pcGyABQsnnIfWOFt6JNj5gCog2U6MLZ//IGYD+nA8nI+mTShREReaA==
+
+sprintf-js@~1.0.2:
+  version "1.0.3"
+  resolved "https://registry.npmmirror.com/sprintf-js/-/sprintf-js-1.0.3.tgz"
+  integrity sha512-D9cPgkvLlV3t3IzL0D0YLvGA9Ahk4PcvVwUbN0dSGr1aP0Nrt4AEnTUbuGvquEC0mA64Gqt1fzirlRs5ibXx8g==
 
 ssh2@^1.15.0:
   version "1.17.0"
@@ -7253,6 +7344,11 @@ underscore.string@~3.3.6:
     sprintf-js "^1.1.1"
     util-deprecate "^1.0.2"
 
+underscore@^1.13.1:
+  version "1.13.8"
+  resolved "https://registry.npmmirror.com/underscore/-/underscore-1.13.8.tgz"
+  integrity sha512-DXtD3ZtEQzc7M8m4cXotyHR+FAS18C64asBYY5vqZexfYryNNnDc02W4hKg3rdQuqOYas1jkseX0+nZXjTXnvQ==
+
 undici-types@~6.21.0:
   version "6.21.0"
   resolved "https://registry.npmmirror.com/undici-types/-/undici-types-6.21.0.tgz"
@@ -7635,6 +7731,11 @@ ws@^8.18.3:
   version "8.18.3"
   resolved "https://registry.npmmirror.com/ws/-/ws-8.18.3.tgz"
   integrity sha512-PEIGCY5tSlUt50cqyMXfCzX+oOPqN0vuGqWzbcJ2xvnkzkq46oOpz7dQaTDBdfICb4N14+GARUDw2XV2N4tvzg==
+
+xmlbuilder@^10.0.0:
+  version "10.1.1"
+  resolved "https://registry.npmmirror.com/xmlbuilder/-/xmlbuilder-10.1.1.tgz"
+  integrity sha512-OyzrcFLL/nb6fMGHbiRDuPup9ljBycsdCypwuyg5AAHvyWzGfChJpCXMG88AGTIMFhGZ9RccFN1e6lhg3hkwKg==
 
 xmlbuilder@^15.1.1:
   version "15.1.1"
